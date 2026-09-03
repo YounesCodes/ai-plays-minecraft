@@ -614,7 +614,10 @@ AGENT_MODE=autonomous
   only deliberately.
 
 Do not invent configuration names — if a key is not in `.env.example`,
-the code does not read it.
+the code does not read it. Inline variables take precedence over `.env`:
+`scripts/start-agent.sh` and `scripts/test-openrouter.sh` only fill in
+variables not already set, so `AGENT_MODE=benchmark npm start` works even
+when `.env` says `AGENT_MODE=autonomous`.
 
 ---
 
