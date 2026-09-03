@@ -24,3 +24,6 @@ Thumbs.db
 
 .vscode/
 .idea/
+
+# Local-only documentation (VM runbooks, as-built notes) — not published.
+docs/
