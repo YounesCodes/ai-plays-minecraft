@@ -16,6 +16,23 @@
 
 const { intEnv } = require('../safety/limits');
 
+// Blocks proven unreachable, remembered ACROSS actions within this process.
+// Without this, every step re-attempts the same nearest unreachable trunk
+// (greedy nearest-first) and the run stalls in a local minimum instead of
+// walking on to farther farmable trees. Bounded FIFO; cleared whenever a
+// fresh scan finds nothing (the bot may have wandered somewhere the skipped
+// blocks are reachable again), which also guarantees termination.
+const globalSkipped = new Set();
+const MAX_GLOBAL_SKIPPED = 500;
+
+function rememberSkipped(key) {
+  globalSkipped.add(key);
+  if (globalSkipped.size > MAX_GLOBAL_SKIPPED) {
+    const oldest = globalSkipped.values().next().value;
+    globalSkipped.delete(oldest);
+  }
+}
+
 function getLogLimit() {
   const v = parseInt(process.env.MAX_LOG_COLLECTION_AMOUNT || '8', 10);
   return Number.isFinite(v) && v > 0 ? Math.min(v, 64) : 8;
@@ -141,18 +158,27 @@ async function collectLogs(bot, amount) {
   const maxDistance = getSearchDistance();
   const perBlockMs = intEnv('PRIMITIVE_TIMEOUT_MS', 30000, 1000, 120000);
   const startCount = countLogs(bot);
-  const skipped = new Set();
+  const skipped = new Set(globalSkipped);
   let lastError = '';
   let attempts = 0;
   const maxAttempts = target + 8; // skips can't spin forever; action timebox backstops anyway
 
   while (countLogs(bot) - startCount < target && attempts < maxAttempts) {
     attempts += 1;
-    const block = findLogBlock(bot, maxDistance, skipped);
+    let block = findLogBlock(bot, maxDistance, skipped);
+    if (!block && globalSkipped.size > 0) {
+      // Everything nearby was skipped in past steps; the bot may have moved
+      // since, so forget once and look again. Still nothing => break below.
+      // This both heals stale skips and guarantees termination.
+      globalSkipped.clear();
+      skipped.clear();
+      block = findLogBlock(bot, maxDistance, skipped);
+    }
     if (!block) break;
     const key = blockKey(block);
     if (!(await approachBlock(bot, block, perBlockMs))) {
       skipped.add(key);
+      rememberSkipped(key);
       lastError = `No path to ${block.name} at ${block.position}`;
       continue;
     }
@@ -160,6 +186,7 @@ async function collectLogs(bot, amount) {
       await collectWithTimeout(bot, block, perBlockMs);
     } catch (err) {
       skipped.add(key);
+      rememberSkipped(key);
       lastError = err && err.message ? err.message : 'Block collection failed';
       stopCollectActivity(bot);
       continue;

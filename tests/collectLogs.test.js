@@ -80,3 +80,47 @@ test('collectLogs reports cleanly when no reachable log exists', async () => {
   assert.strictEqual(res.collected, 0);
   assert.match(res.error, /No path|No log found/);
 });
+
+test('collectLogs remembers skipped blocks across actions (no re-attempt)', async () => {
+  // Fresh coordinates (hermetic vs earlier tests sharing module-level skip
+  // memory). Action 1 skips unreachable A and collects B; action 2 must go
+  // straight to B. Tracked goto targets prove A is attempted exactly once
+  // overall — the old per-action-only memory would attempt A twice.
+  const inv = [];
+  const attempts = [];
+  const bot = {
+    inventory: { items: () => inv.slice() },
+    pathfinder: {
+      goto: async (goal) => {
+        attempts.push(goal.x);
+        if (goal.x === 50) throw new Error('no path');
+      },
+      stop: () => {},
+    },
+    collectBlock: {
+      collect: async () => {
+        inv.push({ name: 'oak_log', count: 1 });
+      },
+      cancelTask: (cb) => {
+        if (cb) cb();
+      },
+    },
+    findBlock: ({ matching }) => {
+      const a = { name: 'oak_log', position: { x: 50, y: 2, z: 50 } };
+      const b = { name: 'oak_log', position: { x: 90, y: 2, z: 90 } };
+      if (matching(a)) return a;
+      if (matching(b)) return b;
+      return null;
+    },
+    clearControlStates: () => {},
+  };
+
+  const first = await collectLogs(bot, 1);
+  assert.strictEqual(first.ok, true);
+  assert.strictEqual(first.collected, 1);
+
+  const second = await collectLogs(bot, 1);
+  assert.strictEqual(second.ok, true);
+  assert.strictEqual(second.collected, 1);
+  assert.deepStrictEqual(attempts, [50, 90, 90]);
+});
