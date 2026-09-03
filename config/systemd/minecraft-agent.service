@@ -1,0 +1,18 @@
+[Unit]
+Description=AI Plays Minecraft Agent
+After=network-online.target minecraft-paper.service
+Requires=minecraft-paper.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USER
+WorkingDirectory=/home/YOUR_LINUX_USER/minecraft-lab/ai-plays-minecraft
+EnvironmentFile=/home/YOUR_LINUX_USER/minecraft-lab/ai-plays-minecraft/.env
+ExecStart=/usr/bin/node /home/YOUR_LINUX_USER/minecraft-lab/ai-plays-minecraft/src/index.js
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

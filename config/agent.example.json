@@ -1,0 +1,12 @@
+{
+  "goal": "Collect 8 logs without dying.",
+  "mcHost": "127.0.0.1",
+  "mcPort": 25565,
+  "mcUsername": "Agent01",
+  "mcVersion": "1.21.11",
+  "maxAgentSteps": 30,
+  "decisionDelayMs": 1000,
+  "observationRadius": 16,
+  "maxBlockSearchDistance": 64,
+  "maxLogCollectionAmount": 8
+}

@@ -1,0 +1,16 @@
+[Unit]
+Description=Minecraft Paper AI Lab Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USER
+WorkingDirectory=/home/YOUR_LINUX_USER/minecraft-lab/server
+ExecStart=/usr/bin/java -Xms2G -Xmx4G -jar paper.jar --nogui
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

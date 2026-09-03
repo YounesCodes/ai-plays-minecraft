@@ -1,0 +1,26 @@
+node_modules/
+.env
+.env-agent
+.env.*
+!.env.example
+
+logs/
+*.log
+
+data/*.json
+data/*.tmp
+data/*.bak
+# Runtime agent state (memory, skills) — never commit learned state.
+data/semantic.json
+data/episodic.json
+data/procedural.json
+data/world.json
+data/skills.json
+
+coverage/
+
+.DS_Store
+Thumbs.db
+
+.vscode/
+.idea/

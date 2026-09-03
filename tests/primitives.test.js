@@ -1,0 +1,84 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert');
+const { validatePrimitiveCall, PRIMITIVE_NAMES } = require('../src/safety/primitiveValidator');
+const { executePrimitive, listPrimitives } = require('../src/primitives');
+
+test('primitive registry lists the trusted set', () => {
+  const names = listPrimitives().map((p) => p.name);
+  for (const expected of ['move_near', 'move_near_entity', 'move_away_from_entity', 'stop_movement', 'find_block', 'find_entity', 'equip_best_melee_weapon', 'attack_entity', 'stop_attacking', 'equip_item', 'inspect_inventory', 'eat_best_food', 'sleep', 'wait', 'mine_block', 'mine_block_type', 'craft_item', 'place_block', 'use_item', 'chat']) {
+    assert.ok(names.includes(expected), `missing primitive ${expected}`);
+  }
+  assert.ok(PRIMITIVE_NAMES.length >= 20);
+});
+
+test('valid primitive calls pass', () => {
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'move_near', args: { x: 1, y: 64, z: 2 } }).ok, true);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'wait', args: { seconds: 3 } }).ok, true);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'chat', args: { message: 'hi' } }).ok, true);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'attack_entity', args: { entityId: 37 } }).ok, true);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'mine_block_type', args: { blockType: 'oak_log', count: 4 } }).ok, true);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'eat_best_food', args: {} }).ok, true);
+});
+
+test('unknown primitive rejected', () => {
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'fly', args: {} }).ok, false);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'bot.chat', args: {} }).ok, false);
+});
+
+test('invalid args rejected', () => {
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'wait', args: { seconds: 99 } }).ok, false);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'move_near', args: { x: 1, y: 64 } }).ok, false);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'attack_entity', args: {} }).ok, false);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'craft_item', args: { item: 'Bad Name!' } }).ok, false);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'chat', args: { message: '' } }).ok, false);
+});
+
+test('unexpected fields rejected', () => {
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'wait', args: { seconds: 1, extra: 2 } }).ok, false);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'wait', args: { seconds: 1 }, foo: 'bar' }).ok, false);
+});
+
+test('dangerous fields rejected', () => {
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'wait', args: { seconds: 1, exec: 'rm' } }).ok, false);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'wait', args: { seconds: 1, code: 'x' } }).ok, false);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'chat', args: { message: 'hi', shell: true } }).ok, false);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'wait', args: JSON.parse('{"seconds":1,"__proto__":1}') }).ok, false);
+  assert.strictEqual(validatePrimitiveCall({ primitive: 'eval', args: {} }).ok, false);
+});
+
+test('executePrimitive validates before touching the bot', async () => {
+  let touched = false;
+  const bot = { chat: () => { touched = true; } };
+  const res = await executePrimitive(bot, { primitive: 'nope', args: {} });
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(touched, false);
+});
+
+test('executePrimitive chat works with a mock bot', async () => {
+  const sent = [];
+  const bot = { chat: (m) => sent.push(m) };
+  const res = await executePrimitive(bot, { primitive: 'chat', args: { message: 'hello' } });
+  assert.strictEqual(res.ok, true);
+  assert.deepStrictEqual(sent, ['hello']);
+});
+
+test('executePrimitive inspect_inventory returns structured data', async () => {
+  const bot = { inventory: { items: () => [{ name: 'oak_log', count: 3 }], slots: [] }, heldItem: null };
+  const res = await executePrimitive(bot, { primitive: 'inspect_inventory', args: {} });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.items.oak_log, 3);
+});
+
+test('executePrimitive find_entity works with mock entities', async () => {
+  const bot = {
+    entity: { position: { x: 0, y: 64, z: 0 } },
+    entities: {
+      7: { id: 7, name: 'creeper', position: { x: 3, y: 64, z: 0, distanceTo: () => 3 } },
+    },
+  };
+  const res = await executePrimitive(bot, { primitive: 'find_entity', args: { hostileOnly: true } });
+  assert.strictEqual(res.ok, true);
+  assert.ok(res.entities.some((e) => e.type === 'creeper'));
+});
