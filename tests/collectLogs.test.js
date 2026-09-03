@@ -78,7 +78,7 @@ test('collectLogs reports cleanly when no reachable log exists', async () => {
   const res = await collectLogs(bot, 2);
   assert.strictEqual(res.ok, false);
   assert.strictEqual(res.collected, 0);
-  assert.match(res.error, /No path|No log found/);
+  assert.match(res.error, /No path|No reachable|No log found/);
 });
 
 test('collectLogs remembers skipped blocks across actions (no re-attempt)', async () => {
@@ -123,4 +123,46 @@ test('collectLogs remembers skipped blocks across actions (no re-attempt)', asyn
   assert.strictEqual(second.ok, true);
   assert.strictEqual(second.collected, 1);
   assert.deepStrictEqual(attempts, [50, 90, 90]);
+});
+
+test('stale skips are ignored after the bot moves far away', async () => {
+  // Skip recorded far from a trunk, then "teleport" next to it: the second
+  // action must collect it instead of staying blind. Old permanent-skip
+  // behavior fails this test (second action finds nothing).
+  const inv = [];
+  const position = { x: 0, y: 64, z: 0 };
+  const bot = {
+    entity: { position },
+    inventory: { items: () => inv.slice() },
+    pathfinder: {
+      goto: async (goal) => {
+        const dx = goal.x - position.x;
+        const dz = goal.z - position.z;
+        if (dx * dx + dz * dz > 20 * 20) throw new Error('too far');
+      },
+      stop: () => {},
+    },
+    collectBlock: {
+      collect: async () => {
+        inv.push({ name: 'oak_log', count: 1 });
+      },
+      cancelTask: (cb) => {
+        if (cb) cb();
+      },
+    },
+    findBlock: ({ matching }) => {
+      const a = { name: 'oak_log', position: { x: 60, y: 64, z: 60 } };
+      return matching(a) ? a : null;
+    },
+    clearControlStates: () => {},
+  };
+
+  const first = await collectLogs(bot, 1);
+  assert.strictEqual(first.ok, false); // skipped from far away
+
+  position.x = 58;
+  position.z = 58; // teleport next to the skipped trunk
+  const second = await collectLogs(bot, 1);
+  assert.strictEqual(second.ok, true);
+  assert.strictEqual(second.collected, 1);
 });

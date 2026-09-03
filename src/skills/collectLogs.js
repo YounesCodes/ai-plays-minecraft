@@ -19,18 +19,36 @@ const { intEnv } = require('../safety/limits');
 // Blocks proven unreachable, remembered ACROSS actions within this process.
 // Without this, every step re-attempts the same nearest unreachable trunk
 // (greedy nearest-first) and the run stalls in a local minimum instead of
-// walking on to farther farmable trees. Bounded FIFO; cleared whenever a
-// fresh scan finds nothing (the bot may have wandered somewhere the skipped
-// blocks are reachable again), which also guarantees termination.
-const globalSkipped = new Set();
+// walking on to farther farmable trees.
+//
+// A skip is only meaningful relative to where the bot was: teleports,
+// respawns and long walks invalidate old skips, otherwise the bot goes blind
+// to a tree it has since approached (observed live: tp next to a skipped
+// trunk, steps kept failing on distant blocks). So each skip records the bot
+// position, and skips farther than SKIP_RADIUS away are ignored. Bounded FIFO.
+const globalSkipped = new Map();
 const MAX_GLOBAL_SKIPPED = 500;
+const SKIP_RADIUS = 12;
 
-function rememberSkipped(key) {
-  globalSkipped.add(key);
+function rememberSkipped(key, bot) {
+  const p = bot && bot.entity && bot.entity.position;
+  globalSkipped.set(key, p ? { x: p.x, y: p.y, z: p.z } : null);
   if (globalSkipped.size > MAX_GLOBAL_SKIPPED) {
-    const oldest = globalSkipped.values().next().value;
+    const oldest = globalSkipped.keys().next().value;
     globalSkipped.delete(oldest);
   }
+}
+
+function isSkipped(key, bot) {
+  if (!globalSkipped.has(key)) return false;
+  const rec = globalSkipped.get(key);
+  if (!rec) return true; // unknown origin: honor conservatively (mocks/tests)
+  const p = bot && bot.entity && bot.entity.position;
+  if (!p) return true;
+  const dx = p.x - rec.x;
+  const dy = p.y - rec.y;
+  const dz = p.z - rec.z;
+  return dx * dx + dy * dy + dz * dz < SKIP_RADIUS * SKIP_RADIUS;
 }
 
 function getLogLimit() {
@@ -66,14 +84,14 @@ function countLogs(bot) {
   return total;
 }
 
-function findLogBlock(bot, maxDistance, skipped) {
+function findLogBlock(bot, maxDistance) {
   try {
     return bot.findBlock({
       matching: (block) =>
         block &&
         typeof block.name === 'string' &&
         block.name.endsWith('_log') &&
-        !(skipped && skipped.has(blockKey(block))),
+        !isSkipped(blockKey(block), bot),
       maxDistance,
     });
   } catch {
@@ -158,35 +176,24 @@ async function collectLogs(bot, amount) {
   const maxDistance = getSearchDistance();
   const perBlockMs = intEnv('PRIMITIVE_TIMEOUT_MS', 30000, 1000, 120000);
   const startCount = countLogs(bot);
-  const skipped = new Set(globalSkipped);
   let lastError = '';
   let attempts = 0;
   const maxAttempts = target + 8; // skips can't spin forever; action timebox backstops anyway
 
   while (countLogs(bot) - startCount < target && attempts < maxAttempts) {
     attempts += 1;
-    let block = findLogBlock(bot, maxDistance, skipped);
-    if (!block && globalSkipped.size > 0) {
-      // Everything nearby was skipped in past steps; the bot may have moved
-      // since, so forget once and look again. Still nothing => break below.
-      // This both heals stale skips and guarantees termination.
-      globalSkipped.clear();
-      skipped.clear();
-      block = findLogBlock(bot, maxDistance, skipped);
-    }
+    const block = findLogBlock(bot, maxDistance);
     if (!block) break;
     const key = blockKey(block);
     if (!(await approachBlock(bot, block, perBlockMs))) {
-      skipped.add(key);
-      rememberSkipped(key);
+      rememberSkipped(key, bot);
       lastError = `No path to ${block.name} at ${block.position}`;
       continue;
     }
     try {
       await collectWithTimeout(bot, block, perBlockMs);
     } catch (err) {
-      skipped.add(key);
-      rememberSkipped(key);
+      rememberSkipped(key, bot);
       lastError = err && err.message ? err.message : 'Block collection failed';
       stopCollectActivity(bot);
       continue;
@@ -198,7 +205,15 @@ async function collectLogs(bot, amount) {
   if (collected > 0) {
     return { ok: true, collected, error: `Only ${collected} of ${target} logs collected; ${lastError || 'no more logs nearby'}` };
   }
-  return { ok: false, collected: 0, error: lastError || `No log found within ${maxDistance} blocks` };
+  return {
+    ok: false,
+    collected: 0,
+    error:
+      lastError ||
+      (globalSkipped.size > 0
+        ? `No reachable log within ${maxDistance} blocks (${globalSkipped.size} skipped as unreachable)`
+        : `No log found within ${maxDistance} blocks`),
+  };
 }
 
 module.exports = { collectLogs, countLogs };
