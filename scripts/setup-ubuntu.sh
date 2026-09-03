@@ -4,8 +4,9 @@ set -euo pipefail
 # Ubuntu VM setup: Node.js 22 + project dependencies.
 # Run from the repository root: bash scripts/setup-ubuntu.sh
 #
-# This script only handles the Node.js side. Full VM provisioning
-# (Java, Paper, firewall, systemd) is documented in docs/vm-setup.md.
+# This script only handles the Node.js side. The rest of the VM
+# (Java, Paper, firewall, systemd) is provisioned manually —
+# see the "First-time deployment" section in README.md.
 
 NEEDS_NODE=0
 if ! command -v node >/dev/null 2>&1; then

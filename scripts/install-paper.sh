@@ -68,4 +68,4 @@ curl -fL \
 
 ls -lh "$SERVER_DIR/paper.jar"
 echo "Downloaded Paper $MC_VERSION (build $BUILD_ID) to $SERVER_DIR/paper.jar"
-echo "Next: first launch + EULA, see docs/vm-setup.md section 9."
+echo "Next: launch Paper once to generate server files, accept the EULA in eula.txt, then configure server.properties."

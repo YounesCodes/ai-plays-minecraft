@@ -1,23 +1,44 @@
 # AI Plays Minecraft
 
-## New VM setup
+## First-time deployment (new VM)
 
-For a complete Proxmox → Ubuntu → Paper → OpenRouter → Agent01 deployment guide, see:
+> Extended runbooks (`docs/vm-setup.md`, architecture notes) are local-only
+> and git-ignored — they live next to the deployment, not on GitHub. This
+> section is the self-contained short path.
 
-**[docs/vm-setup.md](docs/vm-setup.md)**
-
-Short path:
-
-1. provision Ubuntu VM
-2. install Java 21 + Node 22+
-3. install Paper 1.21.11
-4. verify desktop can join
-5. clone repository
-6. configure .env
-7. test OpenRouter
-8. run npm test
-9. run benchmark
-10. run autonomous agent
+1. Provision an Ubuntu 24.04 VM (4 vCPU, 8 GB RAM, 40–60 GB disk) on your LAN.
+2. `sudo apt update && sudo apt upgrade -y`, then install base tools:
+   `sudo apt install -y curl wget git jq unzip tmux ufw ca-certificates gnupg`.
+3. Java 21: `sudo apt install -y openjdk-21-jre-headless` → `java -version`.
+4. Node.js 22+: `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -`
+   then `sudo apt install -y nodejs` → `node --version` must be ≥ v22
+   (or run `bash scripts/setup-ubuntu.sh` from the repo for the Node step).
+5. `mkdir -p ~/minecraft-lab/server ~/minecraft-lab/backups`.
+6. Download Paper **1.21.11** into `~/minecraft-lab/server`
+   (`bash scripts/install-paper.sh` from the repo, or query the Paper
+   downloads API with `jq` and save the STABLE build as `paper.jar` — pin
+   1.21.11, never "latest"). Launch once to generate files, accept the EULA.
+7. `server.properties`: `server-port=25565`, `online-mode=false`,
+   `white-list=true`, `enforce-secure-profile=false`, `spawn-protection=0`,
+   `max-players=5`, `view-distance=10`, `simulation-distance=8`. Restart Paper
+   after changes. ⚠️ `online-mode=false` means usernames are NOT verified —
+   keep the server LAN-only (no router port-forward); whitelist + firewall
+   are the access control.
+8. Whitelist the bot and yourself in the Paper console
+   (`whitelist add Agent01`, `whitelist add <your-name>`), start Paper, and
+   join from a plain vanilla 1.21.11 client to prove the server works before
+   involving the agent.
+9. Firewall: allow SSH first, then
+   `sudo ufw allow from <your-LAN-subnet> to any port 25565 proto tcp`;
+   `sudo ufw enable`; verify with `sudo ufw status verbose`.
+10. `git clone <url> ~/minecraft-lab/ai-plays-minecraft`, `npm ci`,
+    `cp .env.example .env` and set `OPENROUTER_API_KEY`
+    (`OPENROUTER_MODEL=openrouter/free`), `MC_HOST=127.0.0.1`,
+    `MC_USERNAME=Agent01`, `MC_VERSION=1.21.11`, `AGENT_MODE=autonomous`.
+    Inline variables override `.env`, so `AGENT_MODE=benchmark npm start`
+    works even when `.env` says `autonomous`.
+11. `npm run test:openrouter` → `npm test` →
+    `AGENT_MODE=benchmark npm start` → `AGENT_MODE=autonomous npm start`.
 
 Headless Minecraft AI agent. A Mineflayer bot connects to a local Paper
 1.21.11 server; an OpenRouter LLM performs cognition (goals, plans, skills,
