@@ -92,6 +92,12 @@ async function executeAction(bot, action) {
         if (timer) clearTimeout(timer);
         // Untangle the bot so the next step starts from a clean slate even
         // if the underlying collect is still wedged in the background.
+        // Order matters: cancelTask() tells collectblock's task queue to
+        // abort the in-flight collection (without it the zombie keeps
+        // re-issuing pathfinder goals and fights the next step over movement,
+        // surfacing as "goal was changed" instant-fails plus phantom
+        // background collection). The remaining stops are belt and braces.
+        try { if (bot.collectBlock && typeof bot.collectBlock.cancelTask === 'function') bot.collectBlock.cancelTask(() => {}); } catch { /* ignore */ }
         try { if (bot.collectBlock && typeof bot.collectBlock.stop === 'function') bot.collectBlock.stop(); } catch { /* ignore */ }
         try { if (bot.pathfinder && typeof bot.pathfinder.stop === 'function') bot.pathfinder.stop(); } catch { /* ignore */ }
         try { if (typeof bot.clearControlStates === 'function') bot.clearControlStates(); } catch { /* ignore */ }
