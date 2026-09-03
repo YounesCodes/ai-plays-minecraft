@@ -1,5 +1,21 @@
 'use strict';
 
+// Log collection shared by the benchmark action.
+//
+// Robustness design (learned the hard way against real terrain): the travel
+// phase is the wedging risk. Pathfinder can enter a partial-path livelock
+// (replanning forever while the bot stands still, no self-timeout), and
+// collectblock's retry loop then duels every later attempt over pathfinder
+// goals ("goal was changed" instant-fails plus phantom background mining).
+// So each block goes through OUR OWN timeboxed approach first — a
+// single-shot goto with no retry loop, always safe to abandon — and only
+// adjacent blocks are handed to collect(). Unreachable blocks are skipped
+// (tracked, never retried within the same action) so one bad trunk can't
+// stall the action. The action-level timebox in src/agent/actions.js
+// remains as the final backstop.
+
+const { intEnv } = require('../safety/limits');
+
 function getLogLimit() {
   const v = parseInt(process.env.MAX_LOG_COLLECTION_AMOUNT || '8', 10);
   return Number.isFinite(v) && v > 0 ? Math.min(v, 64) : 8;
@@ -8,6 +24,15 @@ function getLogLimit() {
 function getSearchDistance() {
   const v = parseInt(process.env.MAX_BLOCK_SEARCH_DISTANCE || '64', 10);
   return Number.isFinite(v) && v > 0 ? Math.min(v, 128) : 64;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function blockKey(block) {
+  const p = block && block.position;
+  return p ? `${p.x},${p.y},${p.z}` : '?';
 }
 
 function countLogs(bot) {
@@ -24,14 +49,82 @@ function countLogs(bot) {
   return total;
 }
 
-function findLogBlock(bot, maxDistance) {
+function findLogBlock(bot, maxDistance, skipped) {
   try {
     return bot.findBlock({
-      matching: (block) => block && typeof block.name === 'string' && block.name.endsWith('_log'),
+      matching: (block) =>
+        block &&
+        typeof block.name === 'string' &&
+        block.name.endsWith('_log') &&
+        !(skipped && skipped.has(blockKey(block))),
       maxDistance,
     });
   } catch {
     return null;
+  }
+}
+
+function getGoalNear() {
+  try {
+    const pf = require('mineflayer-pathfinder');
+    if (pf && pf.goals && typeof pf.goals.GoalNear === 'function') return pf.goals.GoalNear;
+  } catch {
+    // ignore; caller treats missing pathfinder as already-adjacent
+  }
+  return null;
+}
+
+// Walk to within dig reach of the block, timeboxed. Single-shot goto with
+// no retry loop, so abandoning it on timeout is always safe (unlike
+// abandoning collectblock's retrying collect).
+async function approachBlock(bot, block, timeoutMs) {
+  try {
+    if (!bot.pathfinder || typeof bot.pathfinder.goto !== 'function') return true;
+    const GoalNear = getGoalNear();
+    if (!GoalNear) return true;
+    const goal = new GoalNear(block.position.x, block.position.y, block.position.z, 3);
+    await Promise.race([
+      bot.pathfinder.goto(goal),
+      sleep(timeoutMs).then(() => {
+        throw new Error('approach timed out');
+      }),
+    ]);
+    return true;
+  } catch {
+    stopCollectActivity(bot);
+    return false;
+  }
+}
+
+async function collectWithTimeout(bot, block, timeoutMs) {
+  let timer = null;
+  try {
+    await Promise.race([
+      bot.collectBlock.collect(block),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('collect timed out')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function stopCollectActivity(bot) {
+  try {
+    if (bot.collectBlock && typeof bot.collectBlock.cancelTask === 'function') bot.collectBlock.cancelTask(() => {});
+  } catch {
+    // ignore
+  }
+  try {
+    if (bot.pathfinder && typeof bot.pathfinder.stop === 'function') bot.pathfinder.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    if (typeof bot.clearControlStates === 'function') bot.clearControlStates();
+  } catch {
+    // ignore
   }
 }
 
@@ -46,33 +139,39 @@ async function collectLogs(bot, amount) {
   target = Math.max(1, Math.min(limit, target));
 
   const maxDistance = getSearchDistance();
+  const perBlockMs = intEnv('PRIMITIVE_TIMEOUT_MS', 30000, 1000, 120000);
   const startCount = countLogs(bot);
-  let collected = 0;
+  const skipped = new Set();
+  let lastError = '';
+  let attempts = 0;
+  const maxAttempts = target + 8; // skips can't spin forever; action timebox backstops anyway
 
-  for (let i = 0; i < target; i++) {
-    const block = findLogBlock(bot, maxDistance);
-    if (!block) {
-      if (collected === 0 && countLogs(bot) === startCount) {
-        return { ok: false, collected, error: `No log found within ${maxDistance} blocks` };
-      }
-      return { ok: collected > 0, collected, error: collected > 0 ? `Only ${collected} of ${target} logs collected; no more logs nearby` : `No log found within ${maxDistance} blocks` };
+  while (countLogs(bot) - startCount < target && attempts < maxAttempts) {
+    attempts += 1;
+    const block = findLogBlock(bot, maxDistance, skipped);
+    if (!block) break;
+    const key = blockKey(block);
+    if (!(await approachBlock(bot, block, perBlockMs))) {
+      skipped.add(key);
+      lastError = `No path to ${block.name} at ${block.position}`;
+      continue;
     }
     try {
-      await bot.collectBlock.collect(block);
-      collected = countLogs(bot) - startCount;
+      await collectWithTimeout(bot, block, perBlockMs);
     } catch (err) {
-      const msg = err && err.message ? err.message : 'Block collection failed';
-      return { ok: false, collected, error: msg };
-    }
-    // Re-check: may have picked up extra logs per block; stop early.
-    if (countLogs(bot) - startCount >= target) {
-      collected = countLogs(bot) - startCount;
-      break;
+      skipped.add(key);
+      lastError = err && err.message ? err.message : 'Block collection failed';
+      stopCollectActivity(bot);
+      continue;
     }
   }
 
-  collected = countLogs(bot) - startCount;
-  return { ok: true, collected };
+  const collected = countLogs(bot) - startCount;
+  if (collected >= target) return { ok: true, collected };
+  if (collected > 0) {
+    return { ok: true, collected, error: `Only ${collected} of ${target} logs collected; ${lastError || 'no more logs nearby'}` };
+  }
+  return { ok: false, collected: 0, error: lastError || `No log found within ${maxDistance} blocks` };
 }
 
 module.exports = { collectLogs, countLogs };
