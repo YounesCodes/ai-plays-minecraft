@@ -92,7 +92,7 @@ lightweight:
 
 | Setting | Recommendation              |
 | ------- | --------------------------- |
-| OS      | Ubuntu Server (see §3)      |
+| OS      | Ubuntu Server 24.04 (devbox runs 24.04.4 LTS, see §3) |
 | CPU     | 4 vCPU cores                |
 | RAM     | 8192 MB                     |
 | Disk    | 40–60 GB                    |
@@ -122,7 +122,9 @@ Perform a normal Ubuntu Server installation:
 - Create a normal **non-root user** (all commands below assume that user).
 - Enable the **SSH server** so you can administer the headless VM.
 - **DHCP is fine initially**; consider a static lease/DHCP reservation on
-  your router later so the VM's LAN IP doesn't move.
+  your router later so the VM's LAN IP doesn't move. (Devbox currently sits
+  at `192.168.100.202/24`, gateway `192.168.100.1` — a reservation for the
+  same address works equally well.)
 - No desktop environment, no extra snaps required.
 
 After first login over SSH:
@@ -199,7 +201,9 @@ cd ~/minecraft-lab
 ```
 
 The repository will later be cloned as `~/minecraft-lab/ai-plays-minecraft`
-(§16).
+(§16). On devbox there is additionally a legacy `~/minecraft-lab/agent/`
+prototype (early Mineflayer `bot.js`, predates this repository) — leave it
+alone; it is not part of the lab.
 
 **The Minecraft server and world MUST remain outside the Git
 repository** because:
@@ -357,7 +361,9 @@ server-port=25565
 online-mode=false
 white-list=true
 max-players=5
-motd=AI Plays Minecraft Lab
+motd=AI Agent Lab
+difficulty=easy
+gamemode=survival
 view-distance=10
 simulation-distance=8
 spawn-protection=0
@@ -439,7 +445,9 @@ Verify:
 whitelist list
 ```
 
-Both names should appear. If the desktop later gets "You are not
+Both names should appear. On devbox the whitelist currently contains exactly
+`Agent01` and `younes` (offline-mode UUIDs), and `ops.json` is empty — nobody,
+bot included, is an operator. If the desktop later gets "You are not
 whitelisted", the TLauncher profile name and the whitelist entry differ —
 re-check spelling and case.
 
@@ -448,17 +456,20 @@ re-check spelling and case.
 ## 13. Configure the firewall
 
 Goal: the LAN (and optionally Tailscale) can reach TCP 25565; the public
-Internet cannot. Example private network used below: `192.168.100.0/24` —
-**replace it with your actual LAN subnet**.
+Internet cannot. This lab's actual network is `192.168.100.0/24`
+(devbox = `192.168.100.202`, gateway `192.168.100.1`) — **replace it with
+your actual LAN subnet** if yours differs.
 
 ⚠️ **Do NOT enable UFW before allowing SSH**, or you will lock yourself
-out. Safe sequence:
+out. Safe sequence — scoped to the LAN (this is exactly what devbox
+enforces):
 
 ```bash
-sudo ufw allow OpenSSH
+sudo ufw allow from 192.168.100.0/24 to any port 22 proto tcp
 ```
 
-(or an equivalent specific rule for your SSH port if you changed it).
+(If your SSH port differs, adjust the port; `sudo ufw allow OpenSSH` is
+the less strict equivalent when you have no LAN to scope to yet).
 
 Then the Minecraft rule (LAN only):
 
@@ -479,9 +490,15 @@ sudo ufw status verbose
 ```
 
 You should see the SSH rule plus the 25565 rule limited to your subnet —
-**not** `25565/tcp ALLOW IN Anywhere`.
+**not** `25565/tcp ALLOW IN Anywhere`. For reference, devbox reports
+(default-deny incoming):
 
-Tailscale alternative (allows the Tailscale interface regardless of IP):
+```
+22/tcp    ALLOW IN    192.168.100.0/24
+25565/tcp ALLOW IN    192.168.100.0/24
+```
+
+Tailscale alternative (not installed on devbox — LAN-only for now):
 
 ```bash
 sudo ufw allow in on tailscale0 to any port 25565 proto tcp
@@ -785,7 +802,9 @@ Useful tmux commands:
 - List windows: `Ctrl+B` then `w`; new window: `Ctrl+B` then `c`;
   next/previous: `Ctrl+B` then `n` / `p`
 
-Only move to systemd (§25–§27) once the agent survives interactively.
+Only move to systemd (§25–§27) once the agent survives interactively. On
+devbox this is still the current setup: Paper runs in a tmux session named
+`minecraft`; neither systemd unit is installed yet (Appendix C).
 
 ---
 
@@ -1286,3 +1305,36 @@ Helper scripts: `scripts/install-paper.sh` (pinned Paper download),
 `scripts/setup-ubuntu.sh` (Node 22 + `npm install`),
 `scripts/test-openrouter.sh` (via `npm run test:openrouter`),
 `scripts/start-agent.sh` (via `npm start`).
+
+---
+
+## Appendix C. As-built record — devbox (2026-09-03)
+
+Concrete state of the lab this guide was verified against. If your VM
+differs here, that is the first place to look.
+
+| Item | Actual value |
+| ---- | ------------ |
+| Hostname / user | `ubuntu` / `agent` |
+| LAN | `eth0` = `192.168.100.202/24`, gateway `192.168.100.1` |
+| Proxmox resources | 4 vCPU, 7.7 GiB RAM, 48 GB disk (`/dev/sda1`, 12% used) |
+| OS | Ubuntu 24.04.4 LTS, kernel 6.8.0-138-generic |
+| Java | OpenJDK 21.0.12 (`/usr/bin/java`) |
+| Node.js | v22.23.2 (`/usr/bin/node`) |
+| Paper | 1.21.11 build 132 (`paper.jar` ≈ 53 MB) |
+| Paper command | `java -Xms2G -Xmx4G -jar paper.jar --nogui`, tmux session `minecraft` |
+| World sizes | `world` 17M, `world_nether` 2.2M, `world_the_end` 2.2M |
+| server.properties (relevant) | `online-mode=false`, `white-list=true`, `enforce-secure-profile=false`, `motd=AI Agent Lab`, `difficulty=easy`, `gamemode=survival`, `max-players=5`, `view-distance=10`, `simulation-distance=8`, `spawn-protection=0`, `server-port=25565`, `level-name=world` |
+| Whitelist | `Agent01`, `younes` (offline-mode UUIDs) |
+| Operators | none (`ops.json` is `[]`) |
+| UFW | active, default deny incoming; `22/tcp` + `25565/tcp` ALLOW IN from `192.168.100.0/24` only |
+| Tailscale | not installed (LAN-only) |
+| systemd | neither unit installed — Paper runs in tmux (§24) |
+| Agent `.env` | stock `.env.example` defaults with `OPENROUTER_MODEL=openrouter/free`, `AGENT_MODE=autonomous` |
+| Legacy | `~/minecraft-lab/agent/` — early Mineflayer prototype (`bot.js`), predates the repo; leave alone |
+| Misc | `docker0` interface exists but is DOWN (Docker unused by the lab) |
+
+Changes made while verifying this guide: `enforce-secure-profile` was
+`true` → set to `false` (§10); inline env overrides (e.g.
+`AGENT_MODE=benchmark`) fixed in `scripts/start-agent.sh` (§21); model
+default moved to `openrouter/free` (§18).
