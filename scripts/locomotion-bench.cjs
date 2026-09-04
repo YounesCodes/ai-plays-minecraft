@@ -26,6 +26,7 @@ const path = require('path');
 const readline = require('readline');
 const mineflayer = require('mineflayer');
 const pathfinderPlugin = require('mineflayer-pathfinder');
+const { applyPathfinderCompat } = require('../src/bot/pathfinderCompat');
 const { executePrimitive } = require('../src/primitives');
 const { blockAtPos } = require('../src/blocks');
 
@@ -119,6 +120,11 @@ async function main() {
 
   const bot = mineflayer.createBot({ host: HOST, port: PORT, username: USER, version: VERSION, auth: 'offline' });
   bot.loadPlugin(pathfinderPlugin.pathfinder);
+  try {
+    applyPathfinderCompat(bot, VERSION);
+  } catch {
+    // ignore; spawn handler retries
+  }
   await new Promise((resolve, reject) => {
     bot.once('spawn', resolve);
     bot.once('kicked', (r) => reject(new Error(`kicked: ${r}`)));
@@ -126,6 +132,11 @@ async function main() {
     setTimeout(() => reject(new Error('spawn timeout (is Paper up? is the bot whitelisted?)')), 30000);
   });
   bot.on('spawn', () => {
+    try {
+      applyPathfinderCompat(bot, VERSION);
+    } catch {
+      // ignore
+    }
     const { Movements } = pathfinderPlugin;
     const movements = new Movements(bot);
     movements.allow1by1towers = false;
