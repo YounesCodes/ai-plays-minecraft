@@ -14,8 +14,8 @@ const { validateAction } = require('../safety/validator');
 const { getLimits, countLogsInInventory, isGoalComplete } = require('../safety/limits');
 const { createGoalManager } = require('./goals');
 const { buildContext } = require('./context');
-const { needsPlanner } = require('./cognition');
 const { categorizePlannerError } = require('./cognition');
+const { createActionHistory } = require('./actionHistory');
 const targetFailures = require('../navigation/targetFailures');
 const explorationState = require('../navigation/exploration');
 const { FOOD_PRIORITY } = require('../primitives/survival');
@@ -230,11 +230,10 @@ async function runAutonomousLoop(bot, options = {}) {
 
     const cache = createPerceptionCache();
     const worldMemory = memoryEnabled() ? require('../memory/world') : null;
-    let lastDecision = null; // most recent validated decision (for continue-activity ticks)
+    const actionHistory = createActionHistory({ max: 10 });
     let recentEvents = [];
     let recentFailures = [];
     let lastResult = null;
-    let ticksSincePlan = 99;
     let consecutiveFailures = 0;
     let consecutivePlannerFailures = 0;
     let wasDead = false;
@@ -408,17 +407,15 @@ async function runAutonomousLoop(bot, options = {}) {
         relevant = { semantic: [], episodic: [], procedural: [], world: [] };
       }
 
-      // 4-5. Decide whether an LLM call is required.
+      // 4-5. Fresh cognition every tick. executeNextStep() below awaits the
+      // whole primitive/skill, so when it returns there is NO in-progress
+      // action to "continue" — replaying the last decision would re-run a
+      // completed action blindly (the old 4x move_near bug). Each completed
+      // step produces new information, so the next action always comes from
+      // a fresh decision. (needsPlanner gating belonged to the removed
+      // multi-step plan architecture; autonomous-v2 plans per action.)
       const significantEvent = inferSignificantEvent(lastResult, perception, seenValuables, milestoneItems);
       if (significantEvent) pushEvent({ type: significantEvent.type, step });
-      const gate = needsPlanner({
-        interrupt: topInterrupt && isUrgent(topInterrupt) ? topInterrupt : null,
-        goalState: goalManager.getState(),
-        lastResult,
-        ticksSincePlan,
-        consecutiveFailures,
-        significantEvent,
-      });
 
       // Known skills for validation + prompt.
       let knownSkills = [];
@@ -429,26 +426,42 @@ async function runAutonomousLoop(bot, options = {}) {
       }
       const knownSkillNames = knownSkills.map((s) => s.name).concat(knownSkills.map((s) => s.id));
 
-      let freshDecision = null;
-      if (gate.needed) {
+      // Progress-aware loop signals: what did recent actions actually change,
+      // and is navigation cycling the same ground?
+      const stagnation = actionHistory.detectStagnation();
+      const cellPattern = explorationState.detectOscillation();
+      const oscillation = cellPattern.detected && !recentProgress(actionHistory)
+        ? { detected: true, cells: cellPattern.cells, withoutProgress: true }
+        : { detected: false };
+      if (stagnation.detected) {
+        decisions.record('stagnation', { step, ...stagnation });
+        pushEvent({ type: 'stagnation', step, action: stagnation.repeatedAction });
+      }
+      if (oscillation.detected) {
+        decisions.record('oscillation', { step, ...oscillation });
+        pushEvent({ type: 'oscillation', step });
+      }
+
+      let decision = null;
+      {
         const context = buildContext({
           directive,
           goalState: goalManager.getState(),
           perception,
-          activePlan: [],
           lastResult,
           recentEvents,
           relevantMemories: relevant,
           availableSkills: rankRelevantSkills(knownSkills, relevant),
           exploration: explorationSummary(perception, resourceFailStreak),
           deathSignal: deathSignalFor(recentDeaths),
+          actionHistory: actionHistory.summary(),
+          stagnation,
+          oscillation,
         });
         try {
           const { decision: validated } = await planAutonomous({ context, knownSkillNames });
-          freshDecision = validated;
-          lastDecision = validated;
+          decision = validated;
           consecutivePlannerFailures = 0;
-          ticksSincePlan = 0;
           applyGoalChange({ validated, goalManager, step });
           decisions.record('decision', {
             step,
@@ -473,30 +486,13 @@ async function runAutonomousLoop(bot, options = {}) {
           await sleep(Math.min(30000, backoffBase * Math.pow(2, consecutivePlannerFailures - 1)));
           // Deterministic safe fallback (no LLM): eat if hungry, else wait.
           lastResult = await safeFallback(bot, perception, topInterrupt);
-          ticksSincePlan += 1;
           await sleep(delayMs);
           continue;
         }
-      } else {
-        ticksSincePlan += 1;
       }
 
-      // 6. Resolve one meaningful step. Without a fresh decision, continue
-      // the last validated activity (re-observed every tick, reviewed at
-      // least every 3 ticks by the planner gate) rather than replaying a
-      // stale multi-step plan.
-      let nextStep = null;
-      if (freshDecision) {
-        nextStep = freshDecision.nextStep;
-      } else if (lastDecision) {
-        nextStep = lastDecision.nextStep;
-        decisions.record('repeat', { step, nextStep });
-      } else {
-        // No decision yet: force a planning tick next iteration.
-        ticksSincePlan = 99;
-        await sleep(delayMs);
-        continue;
-      }
+      // 6. The one meaningful step from the fresh decision.
+      const nextStep = decision.nextStep;
 
       // 7. Execute with validation inside executeNextStep.
       const stateBefore = summarizeForReflection(perception);
@@ -523,6 +519,7 @@ async function runAutonomousLoop(bot, options = {}) {
       }
       logger.info(`Step ${step} ${nextStep.type}:${nextStep.name} -> ${describeAction(result)}`);
       decisions.record('step', { step, nextStep, ok: !!result?.ok, error: result?.error || null });
+
 
       // Skill scoring.
       if (isSkillStep) {
@@ -579,6 +576,23 @@ async function runAutonomousLoop(bot, options = {}) {
       } catch {
         perceptionAfter = null;
       }
+      // Compact history: what was tried and what actually changed.
+      // Positions/inventories come from these bounded snapshots.
+      try {
+        const before = invTotals(perception);
+        const after = invTotals(perceptionAfter || perception);
+        actionHistory.record({
+          step,
+          nextStep,
+          result,
+          posBefore: posOf(perception),
+          posAfter: posOf(perceptionAfter || perception),
+          invBefore: before.total,
+          invAfter: after.total,
+        });
+      } catch {
+        // history must never break the loop
+      }
       const reflectEvent = buildOutcomeEvent({ nextStep, result, perceptionAfter, consecutiveFailures });
       if (reflectEvent && reflectionEnabled() && shouldReflect(reflectEvent)) {
         await tryReflect({
@@ -603,6 +617,43 @@ async function runAutonomousLoop(bot, options = {}) {
 }
 
 
+
+// Bounded perception helpers for the compact action history.
+function posOf(perception) {
+  try {
+    const p = perception && (perception.position || (perception.self && perception.self.position));
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.z)) return null;
+    return { x: p.x, y: p.y, z: p.z };
+  } catch {
+    return null;
+  }
+}
+
+function invTotals(perception) {
+  let total = 0;
+  let logs = 0;
+  try {
+    const inv = (perception && perception.inventory) || {};
+    for (const [name, count] of Object.entries(inv)) {
+      const n = Number(count);
+      if (!Number.isFinite(n)) continue;
+      total += n;
+      if (typeof name === 'string' && name.endsWith('_log')) logs += n;
+    }
+  } catch {
+    // ignore
+  }
+  return { total, logs };
+}
+
+// Any meaningful progress in recent history (for oscillation gating).
+function recentProgress(actionHistory, last = 4) {
+  try {
+    return actionHistory.summary(last).some((e) => e && e.progress === true);
+  } catch {
+    return false;
+  }
+}
 
 function explorationSummary(perception, resourceFailStreak) {
   try {

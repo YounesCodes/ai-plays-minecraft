@@ -87,7 +87,7 @@ function decisionTypes(tmp) {
     });
 }
 
-test('autonomous loop executes each fresh decision once, repeats explicitly', async () => {
+test('autonomous loop plans fresh every tick and never replays completed actions', async () => {
   const tmp = freshEnv();
   try {
     const stepA = { type: 'primitive', name: 'wait', args: { seconds: 1 } };
@@ -101,7 +101,8 @@ test('autonomous loop executes each fresh decision once, repeats explicitly', as
     stubBehavior.planAutonomous = async () => {
       plannerCalls += 1;
       // Real planAutonomous wraps the validated object as { decision: ... }.
-      return plannerCalls === 1 ? { decision: fullA } : { decision: fullC };
+      // Alternate decisions: every tick plans fresh (no replay).
+      return { decision: plannerCalls % 2 === 1 ? fullA : fullC };
     };
     stubBehavior.executeNextStep = async (bot, nextStep) => {
       executed.push(JSON.parse(JSON.stringify(nextStep)));
@@ -115,14 +116,15 @@ test('autonomous loop executes each fresh decision once, repeats explicitly', as
       directive: 'test directive',
     });
     assert.strictEqual(summary && summary.status, 'budget_exhausted');
-    assert.strictEqual(plannerCalls, 2);
-    // Fresh decision A executes once; quiet ticks repeat it explicitly until
-    // the periodic review (3 ticks) triggers decision C. No stale replay.
-    assert.deepStrictEqual(executed, [stepA, stepA, stepA, stepA, stepC]);
+    // Every completed action is followed by fresh cognition: one planner
+    // call per tick, zero framework-generated repeats.
+    assert.strictEqual(plannerCalls, 5);
+    assert.deepStrictEqual(executed, [stepA, stepC, stepA, stepC, stepA]);
     // goalChange:null must NOT replace the loop's default goal.
     const types = decisionTypes(tmp);
     assert.ok(!types.includes('goal_changed'), `unexpected goal changes: ${types.join(',')}`);
-    assert.ok(types.includes('repeat'), 'expected explicit repeat records');
+    assert.ok(!types.includes('repeat'), 'framework must never replay completed actions');
+    assert.strictEqual(types.filter((t) => t === 'decision').length, 5);
   } finally {
     clearEnv();
   }
@@ -174,9 +176,9 @@ test('requiresRelocation flows into next context and yields explore', async () =
     };
     await runAgentLoop(mockBot(), { mode: 'autonomous', maxSteps: 6, decisionDelayMs: 1, directive: 'test' });
     assert.deepStrictEqual(executed[0], mineStep);
-    // One bounded repeat of the same activity, then repeated failure forces
-    // a replan that yields explore. No stale multi-step replay.
-    assert.deepStrictEqual(executed[2], exploreStep);
+    // The failure is visible to the very next cognition (no replay), which
+    // yields explore immediately.
+    assert.deepStrictEqual(executed[1], exploreStep);
     // The relocation signal must reach cognition honestly (not prose-mined).
     assert.ok(seenResults.some((r) => r && r.requiresRelocation === true), 'next context must carry requiresRelocation');
   } finally {

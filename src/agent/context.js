@@ -56,14 +56,58 @@ function summarizeSurvival(perception) {
   return { unarmed, foodAvailable, night, nearestHostile };
 }
 
-function buildContext({ directive, goalState, perception, activePlan = [], lastResult = null, recentEvents = [], relevantMemories = {}, availableSkills = [], model = null, exploration = null, deathSignal = null }) {
+// Compact opportunity summary derived from the bounded interestingBlocks
+// scan (category comes from perception's single classification source).
+// Groups duplicates so 12 trunk blocks read as one line, not twelve.
+// Water/lava are terrain, not acquisition opportunities, and are excluded.
+function summarizeOpportunities(perception, maxGroups = 6) {
+  const out = [];
+  try {
+    const blocks = (perception && perception.interestingBlocks) || [];
+    const groups = new Map();
+    for (const b of blocks) {
+      if (!b || typeof b.type !== 'string') continue;
+      const cat = b.category || 'other';
+      if (cat === 'water' || cat === 'lava') continue;
+      const d = typeof b.distance === 'number' ? b.distance : Infinity;
+      const g = groups.get(cat);
+      if (!g) {
+        groups.set(cat, { category: cat, nearestType: b.type, distance: d, countObserved: 1 });
+      } else {
+        g.countObserved += 1;
+        if (d < g.distance) {
+          g.distance = d;
+          g.nearestType = b.type;
+        }
+      }
+    }
+    const arr = [...groups.values()];
+    arr.sort((a, b) => a.distance - b.distance);
+    for (const g of arr.slice(0, maxGroups)) {
+      out.push({
+        category: g.category,
+        nearestType: g.nearestType,
+        distance: Number.isFinite(g.distance) ? g.distance : null,
+        countObserved: g.countObserved,
+      });
+    }
+  } catch {
+    // ignore; opportunities are advisory
+  }
+  return out;
+}
+
+function buildContext({ directive, goalState, perception, lastResult = null, recentEvents = [], relevantMemories = {}, availableSkills = [], model = null, exploration = null, deathSignal = null, actionHistory = [], stagnation = null, oscillation = null }) {
   return {
     directive: directive || process.env.AGENT_DIRECTIVE || DEFAULT_DIRECTIVE,
     currentGoal: goalState?.currentGoal || null,
     subgoals: goalState?.subgoals || [],
     suspendedGoal: goalState?.suspendedGoal || null,
     state: summarizePerception(perception),
-    activePlan: Array.isArray(activePlan) ? activePlan.slice(0, 12) : [],
+    nearbyOpportunities: summarizeOpportunities(perception),
+    actionHistory: Array.isArray(actionHistory) ? actionHistory.slice(-6) : [],
+    stagnation: stagnation && stagnation.detected ? stagnation : { detected: false },
+    oscillation: oscillation && oscillation.detected ? oscillation : { detected: false },
     lastResult: lastResult ? JSON.parse(JSON.stringify(lastResult, (k, v) => (typeof v === 'function' ? undefined : v))) : null,
     recentImportantEvents: Array.isArray(recentEvents) ? recentEvents.slice(-8) : [],
     relevantMemories: {
@@ -84,4 +128,4 @@ function buildContext({ directive, goalState, perception, activePlan = [], lastR
   };
 }
 
-module.exports = { buildContext, summarizePerception, summarizeSurvival };
+module.exports = { buildContext, summarizePerception, summarizeSurvival, summarizeOpportunities };

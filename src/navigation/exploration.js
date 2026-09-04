@@ -7,6 +7,11 @@
 const CELL_SIZE = 32;
 
 const cells = new Map(); // "cx,cz" -> { cellX, cellZ, visits, lastVisitedAt, failures }
+// Bounded ring of recently visited cells (coarse keys) for oscillation
+// detection. One A-B-A return is ordinary backtracking; a repeated return
+// pattern is oscillation. Never exact positions, never large.
+const recentCells = [];
+const MAX_RECENT_CELLS = 12;
 
 function cellKey(x, z, size = CELL_SIZE) {
   return `${Math.floor(Number(x) / size)},${Math.floor(Number(z) / size)}`;
@@ -32,7 +37,27 @@ function recordVisit(x, z, info = {}) {
     const oldest = cells.keys().next().value;
     cells.delete(oldest);
   }
+  recentCells.push(key);
+  while (recentCells.length > MAX_RECENT_CELLS) recentCells.shift();
   return key;
+}
+
+// Conservative oscillation detector over coarse cells: counts A-B-A returns
+// (same cell two visits apart with a different cell between) in the recent
+// ring. Two or more returns with at most 3 distinct cells means the bot is
+// cycling ground instead of progressing. Pure movement pattern — the caller
+// combines it with progress signals (withoutProgress) before bothering
+// cognition.
+function detectOscillation() {
+  const seq = recentCells.slice(-8);
+  if (seq.length < 5) return { detected: false };
+  let returns = 0;
+  for (let i = 0; i + 2 < seq.length; i++) {
+    if (seq[i] === seq[i + 2] && seq[i] !== seq[i + 1]) returns += 1;
+  }
+  if (returns < 2) return { detected: false };
+  if (new Set(seq).size > 3) return { detected: false };
+  return { detected: true, cells: seq.slice(-4), returns };
 }
 
 const DIRECTIONS = ['north', 'south', 'east', 'west'];
@@ -67,10 +92,11 @@ function summary(x, z) {
 
 function clear() {
   cells.clear();
+  recentCells.length = 0;
 }
 
 function stats() {
   return { cells: cells.size, cellSize: CELL_SIZE };
 }
 
-module.exports = { cellKey, parseCell, recordVisit, summary, clear, stats, CELL_SIZE, DIRECTIONS };
+module.exports = { cellKey, parseCell, recordVisit, summary, clear, stats, detectOscillation, CELL_SIZE, DIRECTIONS };

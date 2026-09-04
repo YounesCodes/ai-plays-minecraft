@@ -65,7 +65,6 @@ bot.once('spawn', async () => {
           directive: process.env.AGENT_DIRECTIVE || 'Survive and progress.',
           goalState: { currentGoal: { description: 'Gather wood and establish a foothold', priority: 60 }, subgoals: [], suspendedGoal: null },
           perception,
-          activePlan: [],
           lastResult,
           recentEvents: [],
           relevantMemories: { semantic: [], episodic: [], procedural: [], world: [] },

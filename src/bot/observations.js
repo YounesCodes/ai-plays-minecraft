@@ -14,6 +14,15 @@ const HOSTILE_TYPES = new Set([
   'zoglin', 'warden', 'silverfish', 'endermite', 'stray', 'bogged',
 ]);
 
+// Single source of block-type classification. Emitted on interestingBlocks
+// entries and reused for the cognition opportunity summary — never
+// reimplemented with ad-hoc suffix checks elsewhere.
+function categoryForBlock(name) {
+  if (typeof name !== 'string') return 'other';
+  const m = INTERESTING_MATCHERS.find((mm) => { try { return mm.test(name); } catch { return false; } });
+  return m ? m.category : 'other';
+}
+
 const INTERESTING_MATCHERS = [
   { category: 'log', test: (n) => typeof n === 'string' && n.endsWith('_log') },
   { category: 'crafting_table', test: (n) => n === 'crafting_table' },
@@ -256,6 +265,7 @@ function scanInterestingBlocks(bot, pos, options, cache) {
       const name = block?.name || 'unknown';
       found.push({
         type: name,
+        category: categoryForBlock(name),
         position: { x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) },
         distance: round1(dist3(p, pos)),
       });
@@ -341,4 +351,5 @@ module.exports = {
   timeCategory,
   HOSTILE_TYPES,
   INTERESTING_MATCHERS,
+  categoryForBlock,
 };
