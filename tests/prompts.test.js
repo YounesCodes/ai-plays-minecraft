@@ -18,6 +18,7 @@ test('autonomous prompt states every enforced output bound', () => {
     'proposeSkill',
     'nextStep is REQUIRED',
     'toolWasSuitable',
+    'overrides older memories',
   ]) {
     assert.ok(prompt.includes(needle), `prompt missing constraint: ${needle}`);
   }
