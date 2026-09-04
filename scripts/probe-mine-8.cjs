@@ -6,7 +6,7 @@
 // no benchmark loop) to collect 8 oak logs. Reports honest counts.
 
 const mineflayer = require('mineflayer');
-const { mineBlockType } = require('../src/agent/../primitives/mining');
+const { mineBlockType } = require('../src/primitives/mining');
 const { applyPathfinderCompat } = require('../src/bot/pathfinderCompat');
 
 function arg(name, fallback) {

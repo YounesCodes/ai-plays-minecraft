@@ -54,6 +54,47 @@ function withinReach(me, pos, reach = 5) {
   return dx * dx + dy * dy + dz * dz <= reach * reach;
 }
 
+function distBetween(me, pos) {
+  if (!me || !pos) return null;
+  try {
+    const dx = me.x - pos.x;
+    const dy = me.y - pos.y;
+    const dz = me.z - pos.z;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    return Number.isFinite(d) ? d : null;
+  } catch {
+    return null;
+  }
+}
+
+function numEnvInt(name, fallback, min, max) {
+  const v = parseInt(process.env[name] || '', 10);
+  if (!Number.isFinite(v)) return fallback;
+  return Math.max(min, Math.min(max, v));
+}
+
+// PHASE 1: local acquisition budget. mine_block_type must not chase
+// explore-range targets (50m+ walks with a 12s timeout). Candidates beyond
+// this distance are deferred (counted, reported for relocation) but never
+// approached here. Generic: applies to every block type. Tunable live via
+// MAX_RESOURCE_APPROACH_DISTANCE (default 20, clamp 4..64).
+function maxResourceApproach() {
+  return numEnvInt('MAX_RESOURCE_APPROACH_DISTANCE', 20, 4, 64);
+}
+
+// PHASE 2: distance-aware approach timeout (bounded). Short walks get short
+// timeouts; longer local walks get proportionally more — never
+// exploration-scale. Env-tunable; defaults: 6s base + 600ms/block,
+// clamped to [8s, 20s]. Stall detection still terminates earlier.
+function approachTimeoutFor(dist) {
+  const base = numEnvInt('RESOURCE_APPROACH_BASE_MS', 6000, 2000, 15000);
+  const per = numEnvInt('RESOURCE_APPROACH_PER_BLOCK_MS', 600, 100, 2000);
+  const lo = numEnvInt('RESOURCE_APPROACH_MIN_MS', 8000, 3000, 20000);
+  const hi = numEnvInt('RESOURCE_APPROACH_MAX_MS', 20000, 8000, 45000);
+  const d = Number.isFinite(dist) && dist >= 0 ? dist : 8;
+  return Math.max(lo, Math.min(hi, Math.round(base + per * d)));
+}
+
 // Walk adjacent to a candidate with stall/timeout/abort handling.
 async function approachCandidate(bot, block, ctx, timeoutMs = 12000) {
   const goal = goalNear(
@@ -192,28 +233,22 @@ function collectDrops(bot, watch, beforeIds, pos, radius = 5) {
   return out;
 }
 
-function getGoalNear() {
-  try {
-    const pf = require('mineflayer-pathfinder');
-    if (pf && pf.goals && typeof pf.goals.GoalNear === 'function') return pf.goals.GoalNear;
-  } catch {
-    // ignore; caller treats missing pathfinder as already-adjacent
-  }
-  return null;
-}
-
-async function walkToDrop(bot, dropPos) {
+// PHASE 5: drop retrieval reuses the hardened movement layer
+// (stall-aware, timeout-aware, abort-aware, zombie-goto-safe) instead of a
+// weaker parallel raw-goto + ad-hoc race. Goal radius 1 (was 2): stopping
+// within 2 blocks did not reliably trigger item pickup live.
+async function walkToDrop(bot, dropPos, ctx = {}) {
   try {
     if (!bot.pathfinder || typeof bot.pathfinder.goto !== 'function') return false;
-    const GoalNear = getGoalNear();
-    if (!GoalNear) return false;
-    const goal = new GoalNear(Math.floor(dropPos.x), Math.floor(dropPos.y), Math.floor(dropPos.z), 2);
+    const goal = goalNear(
+      Math.floor(dropPos.x), Math.floor(dropPos.y), Math.floor(dropPos.z), 1
+    );
+    if (!goal) return false; // no pathfinder lib (mocks): assume already there
     try {
-      const arrived = await Promise.race([
-        bot.pathfinder.goto(goal).then(() => true),
-        sleep(6000).then(() => false),
-      ]);
-      return arrived;
+      const res = await gotoWithStallWatch(bot, goal, {
+        timeoutMs: 8000, primitive: 'mine_block_type:collect', ctx,
+      });
+      return res && res.outcome === 'reached';
     } catch {
       return false;
     } finally {
@@ -262,17 +297,35 @@ async function breakOne(bot, block, ctx = {}) {
   // Deliberate collection: walk to a sitting drop instead of hoping. This
   // applies to mapped expected drops AND plain blocks like logs, which
   // otherwise get broken at reach edge and left on the ground (observed
-  // live: 5 oak broken, 0 collected).
+  // live: 5 oak broken, 0 collected). Drops in/near water drift, so chase
+  // the CURRENT item position up to 3 walks (re-scanned each round) rather
+  // than a single stale coordinate. Abort-aware; walkToDrop is stall-safe.
   const totalGrew = () => countTotalInventory(bot) > totalBefore;
-  if (drops.length > 0 && !abortedCheck(ctx)) {
+  for (let walk = 0; walk < 3; walk++) {
+    if (drops.length === 0 || abortedCheck(ctx)) break;
     const alreadyHaveIt = expectedDrop && endDrop !== null ? endDrop > startDrop : totalGrew();
-    if (!alreadyHaveIt) {
-      const dp = drops[0] && drops[0].position ? drops[0].position : pos;
-      await walkToDrop(bot, dp);
-      await sleep(900);
-      drops = collectDrops(bot, watch, beforeIds, pos);
-      if (expectedDrop && endDrop !== null) endDrop = countItem(bot, expectedDrop);
-    }
+    if (alreadyHaveIt) break;
+    // Nearest drop to the BOT (not oldest): drift-aware target.
+    let target = drops[0] && drops[0].position ? drops[0] : null;
+    try {
+      const me = bot && bot.entity && bot.entity.position;
+      if (me) {
+        let bestD = Infinity;
+        for (const d of drops) {
+          if (!d || !d.position) continue;
+          const dx = d.position.x - me.x;
+          const dy = d.position.y - me.y;
+          const dz = d.position.z - me.z;
+          const dd = dx * dx + dy * dy + dz * dz;
+          if (dd < bestD) { bestD = dd; target = d; }
+        }
+      }
+    } catch {}
+    const dp = target && target.position ? target.position : pos;
+    await walkToDrop(bot, dp, ctx);
+    await sleep(900);
+    drops = collectDrops(bot, watch, beforeIds, pos);
+    if (expectedDrop && endDrop !== null) endDrop = countItem(bot, expectedDrop);
   }
   watch.stop();
   const dropCollected = expectedDrop && endDrop !== null ? endDrop > startDrop : totalGrew();
@@ -344,15 +397,27 @@ async function mineBlockType(bot, args, ctx = {}) {
     let candidatesSeen = 0;
     let candidatesSkipped = 0;
     let candidatesFailed = 0;
+    let candidatesDeferred = 0;
+    let nearestDeferredDistance = null;
+    let widenedTo = 0;
     const failures = [];
     const seenKeys = new Set();
-    const partial = (reason, error) => ({
+    const deferredKeys = new Set();
+    // PHASE 3: progressive bounded widening. A fixed top-12 can be
+    // monopolized by one canopy cluster; widen the request bound per
+    // round (never unbounded) and stop as soon as useful candidates exist.
+    const WIDEN_SCHEDULE = [16, 32, 64];
+    const partial = (reason, error, extra = {}) => ({
       ...failPartial({
         blockType, tool, broken, uncollected, blocks, reason,
         candidatesSeen, candidatesSkipped, candidatesFailed,
         searchRadius: maxDistance, error,
       }),
       failures: failures.slice(-12),
+      candidatesDeferred,
+      nearestDeferredDistance,
+      widenedTo,
+      ...extra,
     });
     for (let i = 0; i < count; i++) {
       const abort = abortedCheck(ctx);
@@ -386,13 +451,33 @@ async function mineBlockType(bot, args, ctx = {}) {
           };
         }
         const me = botPos(bot);
+        const budget = maxResourceApproach();
+        // PHASE 3: widen the discovery bound when early rounds yield
+        // nothing useful (canopy monopolizing top-12). Bounded 16→32→64.
+        const requestCount = WIDEN_SCHEDULE[Math.min(round, WIDEN_SCHEDULE.length - 1)];
+        widenedTo = Math.max(widenedTo, requestCount);
         const sel = getSelectableBlocks(bot, {
-          matching: match, blockType, maxDistance, count: 12, kind: 'block', target: blockType,
+          matching: match, blockType, maxDistance, count: requestCount, kind: 'block', target: blockType,
         });
         const eligible = [];
         for (const c of sel.candidates) {
           if (!c || !c.position) continue;
           noteSeen(c.position);
+          // PHASE 1: local-acquisition budget. Beyond-budget candidates
+          // are deferred (reported for relocation), never chased here.
+          const d = distBetween(me, c.position);
+          const local = withinReach(me, c.position) || d === null || d <= budget;
+          if (!local) {
+            const k = `${Math.round(c.position.x)},${Math.round(c.position.y)},${Math.round(c.position.z)}`;
+            if (!deferredKeys.has(k)) {
+              deferredKeys.add(k);
+              candidatesDeferred += 1;
+            }
+            if (nearestDeferredDistance === null || d < nearestDeferredDistance) {
+              nearestDeferredDistance = Math.round(d * 10) / 10;
+            }
+            continue;
+          }
           eligible.push(c);
         }
         for (const c of sel.excluded || []) {
@@ -420,7 +505,15 @@ async function mineBlockType(bot, args, ctx = {}) {
             // ignore; honest empty below
           }
         }
-        if (eligible.length === 0) break; // nothing new this round
+        if (eligible.length === 0) {
+          // Widen when the source may hold more: a capped reply (seen ==
+          // requested) with everything excluded/deferred can still hide a
+          // useful candidate just beyond the current bound. Stop only when
+          // the source is exhausted (uncapped reply) — the for-loop bounds
+          // total rounds regardless.
+          if (sel.candidatesSeen >= requestCount) continue;
+          break;
+        }
         slotHadCandidates = true;
         for (const cand of eligible.slice(0, 4)) {
         if (abortedCheck(ctx)) {
@@ -430,7 +523,8 @@ async function mineBlockType(bot, args, ctx = {}) {
           };
         }
         if (!withinReach(me, cand.position)) {
-          const ap = await approachCandidate(bot, cand, ctx);
+          // PHASE 2: bounded distance-aware timeout (stall still ends early).
+          const ap = await approachCandidate(bot, cand, ctx, approachTimeoutFor(distBetween(me, cand.position)));
           if (!ap.ok) {
             targetFailures.recordFailure({
               dimension, kind: 'block', target: blockType,
@@ -490,8 +584,12 @@ async function mineBlockType(bot, args, ctx = {}) {
               ? `Only broke ${broken} of ${count}; no ${blockType} found within ${maxDistance} blocks`
               : `No ${blockType} found within ${maxDistance} blocks`);
         }
+        const deferred = candidatesDeferred > 0;
         return partial('no_reachable_target',
-          `Could not reach any ${blockType} nearby (seen ${candidatesSeen}, skipped ${candidatesSkipped}, failed ${candidatesFailed})`);
+          deferred
+            ? `Only broke ${broken} of ${count}; ${candidatesSeen} seen but ${candidatesDeferred} beyond local approach (${nearestDeferredDistance}m) — relocation required`
+            : `Could not reach any ${blockType} nearby (seen ${candidatesSeen}, skipped ${candidatesSkipped}, failed ${candidatesFailed})`,
+          { requiresRelocation: deferred });
       }
     }
     const endCount = expectedDrop ? countItem(bot, expectedDrop) : countItem(bot, blockType);
@@ -502,6 +600,8 @@ async function mineBlockType(bot, args, ctx = {}) {
         broken, uncollected, blocks, dropObtained, expectedDropObserved: expectedDrop ? false : null,
         reason: candidatesSeen > 0 ? 'no_reachable_target' : 'resource_not_seen',
         candidatesSeen, candidatesSkipped, candidatesFailed, searchRadius: maxDistance,
+        candidatesDeferred, nearestDeferredDistance, widenedTo,
+        requiresRelocation: candidatesDeferred > 0,
         error: `Broke ${broken} ${blockType} but collected nothing; drops are on the ground nearby`,
       };
     }
@@ -509,10 +609,12 @@ async function mineBlockType(bot, args, ctx = {}) {
       ok: true, primitive: 'mine_block_type', block: blockType, tool,
       broken, uncollected, blocks, dropObtained, expectedDropObserved: expectedDrop ? dropObtained : null,
       candidatesSeen, candidatesSkipped, candidatesFailed, searchRadius: maxDistance,
+      candidatesDeferred, nearestDeferredDistance, widenedTo,
+      requiresRelocation: false,
       failures: failures.slice(-12),
     };
   })();
   return raceWithAbort(bot, run, { timeoutMs, primitive: 'mine_block_type', ctx, extra: { block: blockType, tool } });
 }
 
-module.exports = { mineBlock, mineBlockType, expectedDropFor };
+module.exports = { mineBlock, mineBlockType, expectedDropFor, maxResourceApproach, approachTimeoutFor, distBetween };

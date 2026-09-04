@@ -183,7 +183,7 @@ test('mine_block_type skips cached unreachable targets for alternates', async ()
     clearControlStates: () => {},
     // Realistic mock: findBlocks returns Vec3 positions (real Mineflayer),
     // blockAt materializes them; matching is revalidated on Blocks.
-    findBlocks: () => [{ x: 5, y: 64, z: 5 }, { x: 40, y: 64, z: 40 }],
+    findBlocks: () => [{ x: 5, y: 64, z: 5 }, { x: 10, y: 64, z: 8 }],
     blockAt: (p) => ({
       name: 'oak_log',
       position: { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) },
@@ -207,7 +207,7 @@ test('mine_block_type skips cached unreachable targets for alternates', async ()
     const res = await mineBlockType(bot, { blockType: 'oak_log', count: 1 }, {});
     assert.strictEqual(res.ok, true);
     assert.strictEqual(res.broken, 1);
-    assert.deepStrictEqual(dug, ['40,40']); // near cached block never re-attempted
+    assert.deepStrictEqual(dug, ['10,8']); // near cached block never re-attempted
   } finally {
     targetFailures.clear();
   }
