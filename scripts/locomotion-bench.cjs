@@ -93,6 +93,26 @@ function horiz(a, b) {
   return Math.round(Math.sqrt((a.x - b.x) ** 2 + (a.z - b.z) ** 2) * 10) / 10;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Site survey with the bot standing on location (chunks loaded): what is
+// under/at/above the exact start and goal cells. Makes bad arenas visible
+// BEFORE burning test budget on them.
+function survey(bot, point) {
+  const [x, y, z] = point;
+  const name = (dx, dy, dz) => {
+    try {
+      const b = bot.blockAt({ x: x + dx, y: y + dy, z: z + dz });
+      return b ? b.name : 'unloaded';
+    } catch {
+      return 'error';
+    }
+  };
+  return { ground: name(0, -1, 0), feet: name(0, 0, 0), head: name(0, 1, 0) };
+}
+
 async function main() {
   console.log(`Locomotion microbenchmark: ${USER}@${HOST}:${PORT} MC ${VERSION}, origin ${ORIGIN.join(',')}`);
   console.log(`\n1) In the Paper console, whitelist + prep the bot:\n  whitelist add ${USER}\n  gamemode survival ${USER}\n  time set day\n  (optional, cleaner runs: difficulty peaceful)\n`);
@@ -145,6 +165,11 @@ async function main() {
     const [sx, sy, sz] = t.start;
     const [gx, gy, gz] = t.goal;
     await waitEnter(`\nTEST ${t.name} (${t.note}): paste  tp ${USER} ${sx} ${sy} ${sz}`);
+    await sleep(2000); // let chunks settle after the teleport
+    const siteStart = survey(bot, t.start);
+    const siteGoal = survey(bot, t.goal);
+    console.log(`  site S(${sx},${sy},${sz}): ground=${siteStart.ground} feet=${siteStart.feet} head=${siteStart.head}`);
+    console.log(`  site G(${gx},${gy},${gz}): ground=${siteGoal.ground} feet=${siteGoal.feet} head=${siteGoal.head}`);
     const start = posOf(bot);
     const t0 = Date.now();
     let res;
@@ -160,6 +185,7 @@ async function main() {
     const end = posOf(bot);
     const record = {
       test: t.name,
+      site: { start: siteStart, goal: siteGoal },
       startPosition: start,
       goalPosition: { x: gx, y: gy, z: gz },
       endPosition: end,
