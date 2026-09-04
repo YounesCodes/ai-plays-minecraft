@@ -166,3 +166,40 @@ test('stale skips are ignored after the bot moves far away', async () => {
   assert.strictEqual(second.ok, true);
   assert.strictEqual(second.collected, 1);
 });
+
+
+
+test('adjacent previously-skipped logs are retried (walking heals skips)', async () => {
+  const { collectLogs, _clearSkipped } = require('../src/skills/collectLogs');
+  _clearSkipped();
+  const inv = [];
+  const mkBot = (x, reachable) => ({
+    entity: { position: { x, y: 64, z: 0 } },
+    inventory: { items: () => inv.slice() },
+    pathfinder: { goto: async () => { if (!reachable) throw new Error('no path'); }, stop: () => {}, setGoal: () => {} },
+    collectBlock: { collect: async () => { inv.push({ name: 'oak_log', count: 1 }); }, cancelTask: () => {} },
+    findBlock: ({ matching }) => {
+      const b = { name: 'oak_log', position: { x: 10, y: 64, z: 0 } };
+      return matching(b) ? b : null;
+    },
+    clearControlStates: () => {},
+  });
+  try {
+    // Empty + waiting approach fails before collect.
+    process.env.PRIMITIVE_TIMEOUT_MS = '3000';
+    process.env.MAX_BLOCK_SEARCH_DISTANCE = '40';
+    // 1) from far, the log is unreachable => skip recorded.
+    const far = mkBot(0, false); // 10 blocks away, approach always throws
+    const r1 = await collectLogs(far, 1);
+    assert.strictEqual(r1.ok, false);
+    // 2) now walk adjacent (bot at x=9, 1 block from the log): must collect.
+    const near = mkBot(9, true); // adjacent: approach resolves, collect runs
+    const r2 = await collectLogs(near, 1);
+    assert.strictEqual(r2.ok, true);
+    assert.strictEqual(r2.collected, 1);
+  } finally {
+    delete process.env.PRIMITIVE_TIMEOUT_MS;
+    delete process.env.MAX_BLOCK_SEARCH_DISTANCE;
+    _clearSkipped();
+  }
+});

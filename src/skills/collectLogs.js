@@ -30,9 +30,9 @@ const globalSkipped = new Map();
 const MAX_GLOBAL_SKIPPED = 500;
 const SKIP_RADIUS = 12;
 
-function rememberSkipped(key, bot) {
+function rememberSkipped(key, bot, block) {
   const p = bot && bot.entity && bot.entity.position;
-  globalSkipped.set(key, p ? { x: p.x, y: p.y, z: p.z } : null);
+  globalSkipped.set(key, p ? { x: p.x, y: p.y, z: p.z, blockPosition: block ? { x: block.position.x, y: block.position.y, z: block.position.z } : null } : null);
   if (globalSkipped.size > MAX_GLOBAL_SKIPPED) {
     const oldest = globalSkipped.keys().next().value;
     globalSkipped.delete(oldest);
@@ -45,6 +45,17 @@ function isSkipped(key, bot) {
   if (!rec) return true; // unknown origin: honor conservatively (mocks/tests)
   const p = bot && bot.entity && bot.entity.position;
   if (!p) return true;
+  // A block the bot is already next to is reachable BY DEFINITION — intervals
+  // of walking must be able to heal a skip. Without this (observed live), the
+  // bot walked to a previously-skipped oak, kept ignoring it, and chased
+  // distant canopy instead.
+  const bp = rec.blockPosition;
+  if (bp) {
+    const adx = p.x - bp.x;
+    const ady = p.y - bp.y;
+    const adz = p.z - bp.z;
+    if (adx * adx + ady * ady + adz * adz < 4 * 4) return false; // adjacent: reachable
+  }
   const dx = p.x - rec.x;
   const dy = p.y - rec.y;
   const dz = p.z - rec.z;
@@ -118,13 +129,18 @@ async function approachBlock(bot, block, timeoutMs) {
     const GoalNear = getGoalNear();
     if (!GoalNear) return true;
     const goal = new GoalNear(block.position.x, block.position.y, block.position.z, 3);
-    await Promise.race([
-      bot.pathfinder.goto(goal),
-      sleep(timeoutMs).then(() => {
-        throw new Error('approach timed out');
-      }),
-    ]);
-    return true;
+    let timer = null;
+    try {
+      await Promise.race([
+        bot.pathfinder.goto(goal),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('approach timed out')), timeoutMs);
+        }),
+      ]);
+      return true;
+    } finally {
+      if (timer) clearTimeout(timer); // never leak a 30-90s keep-alive timer
+    }
   } catch {
     stopCollectActivity(bot);
     return false;
@@ -186,14 +202,14 @@ async function collectLogs(bot, amount) {
     if (!block) break;
     const key = blockKey(block);
     if (!(await approachBlock(bot, block, perBlockMs))) {
-      rememberSkipped(key, bot);
+      rememberSkipped(key, bot, block);
       lastError = `No path to ${block.name} at ${block.position}`;
       continue;
     }
     try {
       await collectWithTimeout(bot, block, perBlockMs);
     } catch (err) {
-      rememberSkipped(key, bot);
+      rememberSkipped(key, bot, block);
       lastError = err && err.message ? err.message : 'Block collection failed';
       stopCollectActivity(bot);
       continue;
@@ -216,4 +232,4 @@ async function collectLogs(bot, amount) {
   };
 }
 
-module.exports = { collectLogs, countLogs };
+module.exports = { collectLogs, countLogs, _clearSkipped: () => { globalSkipped.clear(); } };
