@@ -3,6 +3,7 @@
 // Prompts for the autonomous planner + benchmark fallback.
 
 const { listPrimitives } = require('../primitives');
+const { renderCatalog } = require('../safety/primitiveCatalog');
 
 const BENCHMARK_ACTIONS = [
   { name: 'observe', description: 'Re-read the current world state.' },
@@ -23,52 +24,50 @@ function primitiveCatalog() {
 }
 
 function buildSystemPromptAutonomous(directive, skills = []) {
-  const prims = primitiveCatalog().map((p) => `- ${p.name}(${p.args.join(', ')}) — ${p.description}`).join('\n');
+  // Compact hot-path contract (autonomous-v2): ONE strategic decision per
+  // tick. Argument bounds/enums below are rendered from the authoritative
+  // PRIMITIVE_SCHEMAS — copy them exactly, do not improvise values.
+  const descriptions = {};
+  try {
+    for (const p of primitiveCatalog()) descriptions[p.name] = p.description;
+  } catch {
+    // ignore; catalog renders without descriptions
+  }
+  const prims = renderCatalog(descriptions).join('\n');
   const skillLines = (skills || []).slice(0, 10).map((s) => `- skill:${s.name || s.id}(${(s.parameters || []).join(', ')}) — ${s.description || ''}`).join('\n');
   return [
-    'You are an autonomous Minecraft survival player.',
+    'You are an autonomous Minecraft survival player. Each turn you make ONE compact decision.',
     `Long-term directive: ${directive}`,
-    'The world is dynamic: re-evaluate after every meaningful action rather than assuming anything persists.',
-    '',
-    'You may:',
-    '- choose goals and change goals when the situation demands it',
-    '- create short plans from trusted primitives and known skills',
-    '- propose ONE new declarative skill (data only) when no existing option fits',
-    '- record useful memories (facts, lessons, locations)',
-    '- abandon bad plans and retreat from danger',
+    'The world is dynamic: decide from the current observation, then we act and re-observe.',
     '',
     'You may NOT:',
-    '- invent executable host capabilities, shell access, or code',
-    '- access files, environment variables, or arbitrary APIs',
+    '- invent host capabilities, shell access, code, files, or arbitrary APIs',
     '- call arbitrary Mineflayer functions — only the trusted primitives below',
-    '- invent new primitives',
+    '- invent new primitives or skill names',
     '',
-    'Trusted primitives:',
+    'Trusted primitives (exact arg rules — obey them):',
     prims,
-    skillLines ? '\nKnown reusable skills:\n' + skillLines : '\nKnown reusable skills: (none yet — use primitive steps; do NOT invent skill names)',
+    skillLines ? '\nKnown reusable skills (existing only — never invent names):\n' + skillLines : '\nKnown reusable skills: (none yet — use primitive steps)',
     '',
-    'Output exactly one JSON planning object. No Markdown. No code fences. No commentary outside JSON.',
+    'Output exactly one JSON decision object. No Markdown. No code fences. No commentary outside JSON.',
     'Shape:',
-    '{"assessment":{"summary":"...","immediateThreat":null},',
-    ' "goal":{"description":"...","priority":80,"reason":"...","changeGoal":false},',
-    ' "plan":[{"type":"primitive","name":"move_near","args":{"x":1,"y":64,"z":1}}],',
-    ' "nextStep":{"type":"primitive","name":"move_near","args":{"x":1,"y":64,"z":1}},',
-    ' "proposeSkill":null,',
-    ' "memoryToCreate":null}',
-    '- nextStep.type is "primitive" or "skill". For skills: {"type":"skill","name":"<skill name>","args":{...}}.',
-    '- nextStep skill names must come from the Known reusable skills list above. When the list is empty, use primitive steps only.',
-    'proposeSkill, when set, must be a full declarative skill object using ONLY trusted primitives.',
-    'memoryToCreate, when set: {"kind":"semantic|episodic|world","subject":"...","content":"...","confidence":0.7} or {"kind":"world","name":"...","position":{"x":0,"y":64,"z":0}}.',
-    'Strict contract — violations reject the whole plan, so obey exactly:',
-    '- Top-level keys: exactly assessment, goal, plan, nextStep, proposeSkill, memoryToCreate. No extras.',
-    '- assessment.summary: non-empty, max 1000 chars. goal.description: non-empty, max 300 chars; priority 0-100.',
-    '- plan: array of AT MOST 12 steps; each step {"type":"primitive"|"skill","name":"...","args":{...}} using real primitive names with valid args.',
-    '- nextStep is REQUIRED and follows the same step shape.',
-    '- proposeSkill: null, or a COMPLETE skill {"id":"...","name":"...","description":"...","parameters":[],"steps":[{"primitive":"...","args":{...}}]} where id is non-empty (max 80 chars), description non-empty (max 500), parameters is an array (max 8), steps is 1-12 entries each naming a trusted primitive. NEVER send a partial or placeholder skill — when in doubt, use null. A bad proposal fails the entire plan.',
-    'Mining results distinguish blockBroken (dig worked), dropSpawned (an item entity appeared), dropCollected (expected item reached inventory), and toolWasSuitable (false ONLY when a break produced no drop at all — never blame the tool for a drop merely sitting uncollected on the ground).',
-    'When exploration.localSearchExhausted is true, strongly consider the explore primitive to relocate before retrying local resource actions — the nearby targets are proven unreachable, not merely unlucky.',
-    'Current observation overrides older memories for where things ARE right now (blocks, mobs, positions); memories inform what things mean and what worked before. Never mine coordinates the current scan does not show.',
-    'Plans are intentions, not scripts: normally only nextStep executes, then we re-observe.',
+    '{"assessment":"short situation summary",',
+    ' "goalChange":null,',
+    ' "nextStep":{"type":"primitive","name":"mine_block_type","args":{"blockType":"oak_log","count":4}}}',
+    'To change goals, set goalChange: {"description":"...","priority":70,"reason":"..."}. Otherwise null. No ceremony.',
+    '- nextStep.type is "primitive" or "skill"; skill names must come from the list above.',
+    '- Top-level keys: exactly assessment, goalChange, nextStep. No plan, no proposeSkill, no memoryToCreate — extras reject the decision.',
+    '- assessment: non-empty, max 500 chars.',
+    'Resource signals (from the last action result — do not infer from prose):',
+    '- requiresRelocation=true: local targets are exhausted. Strongly prefer explore unless an immediate survival threat overrides.',
+    '- resource_not_seen: the resource was not observed locally.',
+    '- no_reachable_target: observed but locally unreachable/exhausted.',
+    'Grounding rules:',
+    '- attack_entity.entityId MUST be copied from a currently observed entity (entityId field). Never invent IDs.',
+    '- mine_block coordinates MUST come from the current observation, never from stale memory.',
+    '- mine_block_type acquires LOCALLY; distant candidates are deferred by the body.',
+    'Mining truth: blockBroken (dig worked) vs dropSpawned (item appeared) vs dropCollected (in inventory) vs toolWasSuitable (false ONLY when no drop appeared at all). Never blame the tool for an uncollected drop on the ground.',
+    'Current observation overrides older memories for where things ARE; memories inform what things mean. Never mine coordinates the current scan does not show.',
   ].join('\n');
 }
 
@@ -97,7 +96,7 @@ function buildSystemPrompt(goal) {
 function buildUserMessageAutonomous(context) {
   return [
     `Cognition context:\n${JSON.stringify(context)}`,
-    'Respond with the single planning JSON object.',
+    'Respond with the single decision JSON object (assessment, goalChange, nextStep).',
   ].join('\n\n');
 }
 

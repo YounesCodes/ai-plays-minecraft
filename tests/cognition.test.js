@@ -2,37 +2,100 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { validatePlannerOutput, needsPlanner } = require('../src/agent/cognition');
+const { validateAutonomousDecision, needsPlanner } = require('../src/agent/cognition');
 const { buildContext } = require('../src/agent/context');
 const { runBenchmarkLoop } = require('../src/agent/loop');
 
-function goodPlan() {
+// Slim hot-path contract (autonomous-v2): assessment + optional goalChange
+// + exactly one nextStep. No plan[], no proposeSkill, no memoryToCreate.
+function goodDecision() {
   return {
-    assessment: { summary: 'Night approaching, no shelter.', immediateThreat: null },
-    goal: { description: 'Build a basic shelter', priority: 80, reason: 'Night risk', changeGoal: true },
-    plan: [{ type: 'primitive', name: 'move_near', args: { x: 1, y: 64, z: 1 } }],
+    assessment: 'Night approaching, no shelter.',
+    goalChange: null,
     nextStep: { type: 'primitive', name: 'move_near', args: { x: 1, y: 64, z: 1 } },
-    memoryToCreate: null,
-    proposeSkill: null,
   };
 }
 
-test('valid planning output passes', () => {
-  const res = validatePlannerOutput(goodPlan());
+test('valid primitive decision passes', () => {
+  const res = validateAutonomousDecision(goodDecision());
   assert.strictEqual(res.ok, true);
-  assert.strictEqual(res.value.goal.priority, 80);
+  assert.strictEqual(res.value.goalChange, null);
+  assert.strictEqual(res.value.nextStep.name, 'move_near');
 });
 
-test('invalid nextStep rejected (unknown primitive)', () => {
-  const p = goodPlan();
-  p.nextStep = { type: 'primitive', name: 'fly', args: {} };
-  assert.strictEqual(validatePlannerOutput(p).ok, false);
+test('valid skill decision passes for known skills', () => {
+  const d = goodDecision();
+  d.nextStep = { type: 'skill', name: 'real_skill', args: {} };
+  const res = validateAutonomousDecision(d, { knownSkillNames: new Set(['real_skill']) });
+  assert.strictEqual(res.ok, true);
 });
 
-test('unknown skill rejected when allowlist given', () => {
-  const p = goodPlan();
-  p.nextStep = { type: 'skill', name: 'nope', args: {} };
-  assert.strictEqual(validatePlannerOutput(p, { knownSkillNames: new Set(['real_skill']) }).ok, false);
+test('null goalChange keeps the goal; valid goalChange passes', () => {
+  assert.strictEqual(validateAutonomousDecision(goodDecision()).value.goalChange, null);
+  const d = goodDecision();
+  d.goalChange = { description: 'Find a new source of wood', priority: 70, reason: 'exhausted' };
+  const res = validateAutonomousDecision(d);
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.value.goalChange.priority, 70);
+});
+
+test('unknown top-level fields rejected (incl. obsolete rich fields)', () => {
+  for (const extra of ['plan', 'proposeSkill', 'memoryToCreate', 'goal', 'foo']) {
+    const d = { ...goodDecision(), [extra]: extra === 'goal' ? { description: 'x' } : [] };
+    const res = validateAutonomousDecision(d);
+    assert.strictEqual(res.ok, false, extra);
+    assert.match(res.error, /Unexpected decision field/);
+  }
+});
+
+test('missing nextStep rejected', () => {
+  const d = goodDecision();
+  delete d.nextStep;
+  const res = validateAutonomousDecision(d);
+  assert.strictEqual(res.ok, false);
+  assert.match(res.error, /nextStep is required/);
+});
+
+test('unknown primitive rejected', () => {
+  const d = goodDecision();
+  d.nextStep = { type: 'primitive', name: 'fly', args: {} };
+  assert.strictEqual(validateAutonomousDecision(d).ok, false);
+});
+
+test('invalid primitive args rejected', () => {
+  const d = goodDecision();
+  d.nextStep = { type: 'primitive', name: 'attack_entity', args: {} }; // entityId required
+  assert.strictEqual(validateAutonomousDecision(d).ok, false);
+  const e = goodDecision();
+  e.nextStep = { type: 'primitive', name: 'equip_item', args: { item: 'x', destination: 'pocket' } };
+  assert.strictEqual(validateAutonomousDecision(e).ok, false);
+});
+
+test('unknown skill rejected', () => {
+  const d = goodDecision();
+  d.nextStep = { type: 'skill', name: 'nope', args: {} };
+  assert.strictEqual(validateAutonomousDecision(d, { knownSkillNames: new Set(['real_skill']) }).ok, false);
+});
+
+test('assessment length bound enforced', () => {
+  const d = goodDecision();
+  d.assessment = 'x'.repeat(501);
+  assert.strictEqual(validateAutonomousDecision(d).ok, false);
+  const e = goodDecision();
+  e.assessment = '   ';
+  assert.strictEqual(validateAutonomousDecision(e).ok, false);
+});
+
+test('goal description and priority bounds enforced', () => {
+  const d = goodDecision();
+  d.goalChange = { description: '', priority: 70 };
+  assert.strictEqual(validateAutonomousDecision(d).ok, false);
+  const e = goodDecision();
+  e.goalChange = { description: 'x'.repeat(201), priority: 70 };
+  assert.strictEqual(validateAutonomousDecision(e).ok, false);
+  const f = goodDecision();
+  f.goalChange = { description: 'ok', priority: 999 };
+  assert.strictEqual(validateAutonomousDecision(f).value.goalChange.priority, 100);
 });
 
 test('interrupt takes priority in planner gating', () => {
@@ -97,27 +160,20 @@ test('categorizePlannerError buckets invalid planner output', () => {
   assert.strictEqual(categorizePlannerError(new Error('OpenRouter returned invalid JSON')), 'parse-failure');
   assert.strictEqual(categorizePlannerError(new Error('Invalid plan step: Unknown primitive: fly')), 'unknown-primitive');
   assert.strictEqual(categorizePlannerError(new Error('Invalid plan step: Unknown skill: foo')), 'unknown-skill');
-  assert.strictEqual(categorizePlannerError(new Error('plan has too many steps (max 12)')), 'plan-too-long');
-  assert.strictEqual(categorizePlannerError(new Error('Invalid proposeSkill: Skill id must be a non-empty string (max 80 chars)')), 'skill-schema');
+  assert.strictEqual(categorizePlannerError(new Error('Unexpected decision field: "plan"')), 'unexpected-fields');
   assert.strictEqual(categorizePlannerError(new Error('attack_entity: unexpected argument "speed"')), 'invalid-args');
   assert.strictEqual(categorizePlannerError(new Error('mine_block: missing required argument "x"')), 'missing-fields');
   assert.strictEqual(categorizePlannerError(new Error('something completely different')), 'other');
 });
 
 test('unknown skill names fail even with an empty library', () => {
-  const { validatePlannerOutput } = require('../src/agent/cognition');
-  const base = {
-    assessment: { summary: 'test' },
-    goal: { description: 'g', priority: 50, reason: 'r', changeGoal: false },
-    plan: [],
-    proposeSkill: null,
-    memoryToCreate: null,
-  };
+  const { validateAutonomousDecision } = require('../src/agent/cognition');
   const bad = {
-    ...base,
+    assessment: 'test',
+    goalChange: null,
     nextStep: { type: 'skill', name: 'explore_for_trees_and_table', args: {} },
   };
-  const res = validatePlannerOutput(bad, { knownSkillNames: new Set() });
+  const res = validateAutonomousDecision(bad, { knownSkillNames: new Set() });
   assert.strictEqual(res.ok, false);
   assert.match(res.error, /Unknown skill/);
 });

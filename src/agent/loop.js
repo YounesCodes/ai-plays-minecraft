@@ -230,7 +230,7 @@ async function runAutonomousLoop(bot, options = {}) {
 
     const cache = createPerceptionCache();
     const worldMemory = memoryEnabled() ? require('../memory/world') : null;
-    let activePlan = [];
+    let lastDecision = null; // most recent validated decision (for continue-activity ticks)
     let recentEvents = [];
     let recentFailures = [];
     let lastResult = null;
@@ -429,13 +429,13 @@ async function runAutonomousLoop(bot, options = {}) {
       }
       const knownSkillNames = knownSkills.map((s) => s.name).concat(knownSkills.map((s) => s.id));
 
-      let freshPlan = null;
+      let freshDecision = null;
       if (gate.needed) {
         const context = buildContext({
           directive,
           goalState: goalManager.getState(),
           perception,
-          activePlan,
+          activePlan: [],
           lastResult,
           recentEvents,
           relevantMemories: relevant,
@@ -444,30 +444,24 @@ async function runAutonomousLoop(bot, options = {}) {
           deathSignal: deathSignalFor(recentDeaths),
         });
         try {
-          const { plan: validated } = await planAutonomous({ context, knownSkillNames });
-          freshPlan = validated;
+          const { decision: validated } = await planAutonomous({ context, knownSkillNames });
+          freshDecision = validated;
+          lastDecision = validated;
           consecutivePlannerFailures = 0;
           ticksSincePlan = 0;
-          applyPlannerSideEffects({ validated, goalManager, step, perception });
-          activePlan = Array.isArray(validated.plan) ? [...validated.plan] : [];
-          // The prompt example shows nextStep duplicated as plan[0]; executing
-          // nextStep now and shifting plan[0] later would run it twice.
-          if (activePlan.length > 0 && sameStep(activePlan[0], freshPlan.nextStep)) {
-            activePlan.shift();
-            logger.debug('Dropped plan[0] duplicate of nextStep.');
-          }
-          decisions.record('plan', {
+          applyGoalChange({ validated, goalManager, step });
+          decisions.record('decision', {
             step,
-            assessment: validated.assessment?.summary?.slice(0, 300),
-            goal: validated.goal?.description,
+            contract: 'autonomous-v2',
+            assessment: validated.assessment?.slice(0, 300),
+            goalChange: validated.goalChange?.description || null,
             nextStep: validated.nextStep,
-            proposeSkill: validated.proposeSkill ? validated.proposeSkill.id : null,
           });
         } catch (err) {
           consecutivePlannerFailures += 1;
           metrics.inc('llmErrors');
           logger.error(`Step ${step}: autonomous planner failed (${consecutivePlannerFailures}/${maxPlannerFailures}): ${err?.message || err}`);
-          decisions.record('planner_failed', { step, error: String(err?.message || err).slice(0, 300), consecutive: consecutivePlannerFailures, category: categorizePlannerError(err), model: process.env.OPENROUTER_MODEL || null });
+          decisions.record('planner_failed', { step, contract: 'autonomous-v2', error: String(err?.message || err).slice(0, 300), consecutive: consecutivePlannerFailures, category: categorizePlannerError(err), model: process.env.OPENROUTER_MODEL || null });
           if (consecutivePlannerFailures >= maxPlannerFailures) {
             logger.warn(`Circuit breaker: pausing planning after ${consecutivePlannerFailures} consecutive failures.`);
             decisions.record('circuit_breaker', { step, consecutive: consecutivePlannerFailures });
@@ -487,14 +481,18 @@ async function runAutonomousLoop(bot, options = {}) {
         ticksSincePlan += 1;
       }
 
-      // 6. Resolve one meaningful step.
+      // 6. Resolve one meaningful step. Without a fresh decision, continue
+      // the last validated activity (re-observed every tick, reviewed at
+      // least every 3 ticks by the planner gate) rather than replaying a
+      // stale multi-step plan.
       let nextStep = null;
-      if (freshPlan) {
-        nextStep = freshPlan.nextStep;
-      } else if (activePlan.length > 0) {
-        nextStep = activePlan.shift();
+      if (freshDecision) {
+        nextStep = freshDecision.nextStep;
+      } else if (lastDecision) {
+        nextStep = lastDecision.nextStep;
+        decisions.record('repeat', { step, nextStep });
       } else {
-        // No plan queued: force a planning tick next iteration.
+        // No decision yet: force a planning tick next iteration.
         ticksSincePlan = 99;
         await sleep(delayMs);
         continue;
@@ -604,16 +602,7 @@ async function runAutonomousLoop(bot, options = {}) {
   }
 }
 
-function sameStep(a, b) {
-  // Deep-equality for plan steps (type + name + args) used to drop a
-  // plan[0] that merely repeats the just-executed nextStep.
-  try {
-    if (!a || !b || a.type !== b.type || a.name !== b.name) return false;
-    return JSON.stringify(a.args || {}) === JSON.stringify(b.args || {});
-  } catch {
-    return false;
-  }
-}
+
 
 function explorationSummary(perception, resourceFailStreak) {
   try {
@@ -686,77 +675,28 @@ function rankRelevantSkills(skills, relevant) {
   return arr.slice(0, 10);
 }
 
-function applyPlannerSideEffects({ validated, goalManager, step, perception }) {
-  // Goal update: only an explicit changeGoal replaces the current goal.
-  // (Previously any description drift replaced it, which thrashed goals.)
-  const current = goalManager.getState().currentGoal;
-  const incoming = validated.goal || {};
-  if (!current || incoming.changeGoal === true) {
-    const prev = current?.description || null;
-    goalManager.setGoal(incoming.description, {
-      priority: incoming.priority,
-      reason: incoming.reason,
-      subgoals: [],
-    });
-    metrics.inc('goalChanges');
-    decisions.record('goal_changed', { from: prev, to: incoming.description, reason: incoming.reason, step });
-  } else {
-    logger.debug('Keeping current goal; planner did not set changeGoal.');
+// Goal update for the slim contract: a present goalChange replaces the
+// current goal; null keeps it. No description-drift replacement, so goals
+// cannot thrash. Skill creation and memory creation are NOT hot-path
+// behaviors: skills execute from the existing library, memories are written
+// by reflection/outcome paths (death, milestones, discoveries) instead of
+// every reasoning turn. Skill generation stays available as a separate
+// operation (src/skills/generator.js); a future trigger is repeated
+// successful primitive sequences or reflection-identified procedures.
+function applyGoalChange({ validated, goalManager, step }) {
+  const incoming = validated.goalChange || null;
+  if (!incoming) {
+    logger.debug('Keeping current goal; planner sent goalChange:null.');
+    return;
   }
-  // Proposed skill.
-  if (validated.proposeSkill && skillGenEnabled()) {
-    try {
-      const res = skillLibrary.put(validated.proposeSkill);
-      if (res?.ok) {
-        metrics.inc('skillsGenerated');
-        decisions.record('skill_created', { id: validated.proposeSkill.id, step });
-        if (memoryEnabled()) {
-          try {
-            require('../memory/procedural').upsert({ skillId: validated.proposeSkill.id, description: validated.proposeSkill.description });
-          } catch { /* ignore */ }
-        }
-      } else {
-        decisions.record('skill_rejected', { id: validated.proposeSkill?.id || null, error: res?.error || 'invalid', step });
-      }
-    } catch (err) {
-      decisions.record('skill_rejected', { error: err?.message || 'store failed', step });
-    }
-  }
-  // Inline memory proposal.
-  if (validated.memoryToCreate && memoryEnabled()) {
-    applyMemoryProposal(validated.memoryToCreate, perception, step);
-  }
-}
-
-function applyMemoryProposal(m, perception, step) {
-  try {
-    if (m.kind === 'semantic' && m.subject && m.content) {
-      const res = writeSemanticMemory({ subject: m.subject, content: m.content, confidence: m.confidence ?? 0.6, source: 'planner' });
-      if (res?.ok) {
-        metrics.inc('memoriesWritten');
-        decisions.record('memory_written', { kind: 'semantic', subject: m.subject, step });
-      }
-    } else if (m.kind === 'episodic' && (m.summary || m.content)) {
-      const res = writeEpisodicMemory({
-        summary: m.summary || m.content,
-        context: { position: perception?.position || null },
-        lesson: m.lesson || '',
-      });
-      if (res?.ok) {
-        metrics.inc('memoriesWritten');
-        decisions.record('memory_written', { kind: 'episodic', step });
-      }
-    } else if (m.kind === 'world' && m.name && m.position) {
-      const world = require('../memory/world');
-      const res = world.remember(m.name, m.position, m.metadata || {}, perception?.self?.dimension);
-      if (res?.ok) {
-        metrics.inc('memoriesWritten');
-        decisions.record('memory_written', { kind: 'world', name: m.name, step });
-      }
-    }
-  } catch {
-    // ignore
-  }
+  const prev = goalManager.getState().currentGoal?.description || null;
+  goalManager.setGoal(incoming.description, {
+    priority: incoming.priority,
+    reason: incoming.reason,
+    subgoals: [],
+  });
+  metrics.inc('goalChanges');
+  decisions.record('goal_changed', { from: prev, to: incoming.description, reason: incoming.reason, step });
 }
 
 async function safeFallback(bot, perception, topInterrupt) {

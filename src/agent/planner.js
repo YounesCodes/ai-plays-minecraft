@@ -9,8 +9,11 @@ const {
   buildSystemPrompt, buildUserMessage,
   buildSystemPromptAutonomous, buildUserMessageAutonomous,
 } = require('./prompts');
-const { validatePlannerOutput } = require('./cognition');
+const { validateAutonomousDecision, categorizePlannerError } = require('./cognition');
 const metrics = require('../telemetry/metrics');
+
+// Slim hot-path contract version for before/after telemetry comparison.
+const AUTONOMOUS_CONTRACT = 'autonomous-v2';
 
 function stripCodeFences(text) {
   let t = String(text).trim();
@@ -57,7 +60,9 @@ async function plan({ goal, state, lastResult }) {
   }
 }
 
-// Autonomous planner: rich planning object, validated before return.
+// Autonomous planner: ONE compact decision per tick (contract autonomous-v2),
+// validated before return. Skill creation and memory creation are NOT part
+// of this response — they run through their own separate paths.
 async function planAutonomous({ context, knownSkillNames = [], temperature = 0.4 }) {
   const skills = context?.availableRelevantSkills || [];
   const messages = [
@@ -65,11 +70,14 @@ async function planAutonomous({ context, knownSkillNames = [], temperature = 0.4
     { role: 'user', content: buildUserMessageAutonomous(context) },
   ];
   metrics.inc('llmCalls');
+  metrics.inc('plannerCalls');
   let result;
   try {
     result = await complete(messages, { temperature });
   } catch (err) {
     metrics.inc('llmErrors');
+    metrics.inc('plannerInvalid');
+    metrics.inc('plannerInvalid_transport');
     throw err;
   }
   const parsed = (() => {
@@ -77,18 +85,28 @@ async function planAutonomous({ context, knownSkillNames = [], temperature = 0.4
       return extractJson(result.content);
     } catch (err) {
       metrics.inc('llmErrors');
+      metrics.inc('plannerInvalid');
+      metrics.inc('plannerInvalid_parse-failure');
       throw err;
     }
   })();
-  const check = validatePlannerOutput(parsed, { knownSkillNames: new Set(knownSkillNames) });
+  const check = validateAutonomousDecision(parsed, { knownSkillNames: new Set(knownSkillNames) });
   if (!check.ok) {
     metrics.inc('llmErrors');
+    metrics.inc('plannerInvalid');
+    try {
+      metrics.inc(`plannerInvalid_${categorizePlannerError(new Error(check.error))}`);
+    } catch {
+      // counter name must never break planning
+    }
     const err = new Error(`Planner output failed validation: ${check.error}`);
     err.validationError = check.error;
     err.raw = parsed;
+    err.contract = AUTONOMOUS_CONTRACT;
     throw err;
   }
-  return { plan: check.value, model: result.model, usage: result.usage || null };
+  metrics.inc('plannerValid');
+  return { decision: check.value, contract: AUTONOMOUS_CONTRACT, model: result.model, usage: result.usage || null };
 }
 
-module.exports = { plan, planAutonomous, extractJson };
+module.exports = { plan, planAutonomous, extractJson, AUTONOMOUS_CONTRACT };

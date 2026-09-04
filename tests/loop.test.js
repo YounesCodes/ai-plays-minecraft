@@ -87,37 +87,21 @@ function decisionTypes(tmp) {
     });
 }
 
-test('autonomous loop executes plan steps once each, in order', async () => {
+test('autonomous loop executes each fresh decision once, repeats explicitly', async () => {
   const tmp = freshEnv();
   try {
     const stepA = { type: 'primitive', name: 'wait', args: { seconds: 1 } };
-    const stepB = { type: 'primitive', name: 'wait', args: { seconds: 2 } };
     const stepC = { type: 'primitive', name: 'wait', args: { seconds: 3 } };
     let plannerCalls = 0;
     const executed = [];
-    // NOTE: the stub returns the loop's internal "validated" shape directly.
-    // First plan deliberately repeats nextStep as plan[0] (the shape the
-    // prompt example shows). The loop must NOT execute it twice.
-    const fullA = {
-      assessment: { summary: 'test' },
-      goal: { description: 'test goal', priority: 50, reason: 'test', changeGoal: false },
-      plan: [stepA, stepB],
-      nextStep: stepA,
-      proposeSkill: null,
-      memoryToCreate: null,
-    };
-    const fullC = {
-      assessment: { summary: 'test' },
-      goal: { description: 'test goal', priority: 50, reason: 'test', changeGoal: false },
-      plan: [],
-      nextStep: stepC,
-      proposeSkill: null,
-      memoryToCreate: null,
-    };
+    // NOTE: the stub returns the loop's internal shape directly.
+    // Slim contract: assessment string + goalChange + one nextStep.
+    const fullA = { assessment: 'test A', goalChange: null, nextStep: stepA };
+    const fullC = { assessment: 'test C', goalChange: null, nextStep: stepC };
     stubBehavior.planAutonomous = async () => {
       plannerCalls += 1;
-      // Real planAutonomous wraps the validated object as { plan: ... }.
-      return plannerCalls === 1 ? { plan: fullA } : { plan: fullC };
+      // Real planAutonomous wraps the validated object as { decision: ... }.
+      return plannerCalls === 1 ? { decision: fullA } : { decision: fullC };
     };
     stubBehavior.executeNextStep = async (bot, nextStep) => {
       executed.push(JSON.parse(JSON.stringify(nextStep)));
@@ -126,19 +110,75 @@ test('autonomous loop executes plan steps once each, in order', async () => {
 
     const summary = await runAgentLoop(mockBot(), {
       mode: 'autonomous',
-      maxSteps: 4,
+      maxSteps: 5,
       decisionDelayMs: 1,
       directive: 'test directive',
     });
     assert.strictEqual(summary && summary.status, 'budget_exhausted');
     assert.strictEqual(plannerCalls, 2);
-    // A, then B (not A again), then C. The old code executed A twice.
-    assert.deepStrictEqual(executed, [stepA, stepB, stepC]);
-    // The canned goal ('test goal', changeGoal:false) differs from the loop's
-    // default goal, yet must NOT replace it: no goal_changed may be recorded.
-    // The old description-drift code recorded two.
+    // Fresh decision A executes once; quiet ticks repeat it explicitly until
+    // the periodic review (3 ticks) triggers decision C. No stale replay.
+    assert.deepStrictEqual(executed, [stepA, stepA, stepA, stepA, stepC]);
+    // goalChange:null must NOT replace the loop's default goal.
     const types = decisionTypes(tmp);
     assert.ok(!types.includes('goal_changed'), `unexpected goal changes: ${types.join(',')}`);
+    assert.ok(types.includes('repeat'), 'expected explicit repeat records');
+  } finally {
+    clearEnv();
+  }
+});
+
+test('goalChange replaces the goal exactly once', async () => {
+  const tmp = freshEnv();
+  try {
+    const stepA = { type: 'primitive', name: 'wait', args: { seconds: 1 } };
+    let plannerCalls = 0;
+    stubBehavior.planAutonomous = async () => {
+      plannerCalls += 1;
+      if (plannerCalls === 1) {
+        return { decision: { assessment: 'relocate', goalChange: { description: 'Find wood elsewhere', priority: 70, reason: 'exhausted' }, nextStep: stepA } };
+      }
+      return { decision: { assessment: 'steady', goalChange: null, nextStep: stepA } };
+    };
+    stubBehavior.executeNextStep = async () => ({ ok: true });
+    await runAgentLoop(mockBot(), { mode: 'autonomous', maxSteps: 3, decisionDelayMs: 1, directive: 'test' });
+    const types = decisionTypes(tmp);
+    assert.strictEqual(types.filter((t) => t === 'goal_changed').length, 1);
+  } finally {
+    clearEnv();
+  }
+});
+
+test('requiresRelocation flows into next context and yields explore', async () => {
+  const tmp = freshEnv();
+  try {
+    const mineStep = { type: 'primitive', name: 'mine_block_type', args: { blockType: 'oak_log', count: 4 } };
+    const exploreStep = { type: 'primitive', name: 'explore', args: { distance: 32, direction: 'west' } };
+    const seenResults = [];
+    let plannerCalls = 0;
+    const executed = [];
+    stubBehavior.planAutonomous = async ({ context }) => {
+      plannerCalls += 1;
+      seenResults.push(context && context.lastResult ? { ...context.lastResult } : null);
+      if (plannerCalls === 1) {
+        return { decision: { assessment: 'need wood', goalChange: null, nextStep: mineStep } };
+      }
+      return { decision: { assessment: 'relocate', goalChange: null, nextStep: exploreStep } };
+    };
+    stubBehavior.executeNextStep = async (bot, nextStep) => {
+      executed.push(JSON.parse(JSON.stringify(nextStep)));
+      if (nextStep.name === 'mine_block_type') {
+        return { ok: false, primitive: 'mine_block_type', reason: 'no_reachable_target', requiresRelocation: true, candidatesSeen: 30, candidatesDeferred: 18 };
+      }
+      return { ok: true, primitive: 'explore', distanceMoved: 28 };
+    };
+    await runAgentLoop(mockBot(), { mode: 'autonomous', maxSteps: 6, decisionDelayMs: 1, directive: 'test' });
+    assert.deepStrictEqual(executed[0], mineStep);
+    // One bounded repeat of the same activity, then repeated failure forces
+    // a replan that yields explore. No stale multi-step replay.
+    assert.deepStrictEqual(executed[2], exploreStep);
+    // The relocation signal must reach cognition honestly (not prose-mined).
+    assert.ok(seenResults.some((r) => r && r.requiresRelocation === true), 'next context must carry requiresRelocation');
   } finally {
     clearEnv();
   }
@@ -209,17 +249,10 @@ test('consecutive resource failures raise localSearchExhausted in context', asyn
   try {
     const contexts = [];
     const mineStep = { type: 'primitive', name: 'mine_block_type', args: { blockType: 'oak_log', count: 1 } };
-    const canned = {
-      assessment: { summary: 'test' },
-      goal: { description: 'test goal', priority: 50, reason: 'test', changeGoal: false },
-      plan: [],
-      nextStep: mineStep,
-      proposeSkill: null,
-      memoryToCreate: null,
-    };
+    const canned = { assessment: 'test', goalChange: null, nextStep: mineStep };
     stubBehavior.planAutonomous = async ({ context }) => {
       contexts.push(JSON.parse(JSON.stringify(context.exploration || null)));
-      return { plan: canned };
+      return { decision: canned };
     };
     stubBehavior.executeNextStep = async () => ({
       ok: false,

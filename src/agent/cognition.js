@@ -4,7 +4,6 @@
 // No Mineflayer, no network here — pure decisions over bounded data.
 
 const { validatePrimitiveCall } = require('../safety/primitiveValidator');
-const { validateSkill } = require('../safety/skillValidator');
 
 function validatePlanStep(step, knownSkillNames = new Set()) {
   if (!step || typeof step !== 'object' || Array.isArray(step)) {
@@ -41,76 +40,53 @@ function validatePlanStep(step, knownSkillNames = new Set()) {
   return { ok: false, error: `Unknown step type: ${step.type}` };
 }
 
-function validatePlannerOutput(output, options = {}) {
+// Slim autonomous hot-path decision (contract autonomous-v2): one compact
+// strategic choice per tick. The rich v1 fields (goal object every turn,
+// plan[], proposeSkill, memoryToCreate) proved too unreliable for small
+// models, so they are rejected here — skill/memory/reflection happen
+// through their own separate paths, not inside every reasoning turn.
+function validateAutonomousDecision(output, options = {}) {
   const knownSkillNames = options.knownSkillNames instanceof Set ? options.knownSkillNames : new Set(options.knownSkillNames || []);
   if (!output || typeof output !== 'object' || Array.isArray(output)) {
-    return { ok: false, error: 'Planner output must be an object' };
+    return { ok: false, error: 'Decision must be an object' };
   }
   for (const key of Object.keys(output)) {
-    if (!['assessment', 'goal', 'plan', 'nextStep', 'proposeSkill', 'memoryToCreate'].includes(key)) {
-      return { ok: false, error: `Unexpected planner field: "${key}"` };
+    if (!['assessment', 'goalChange', 'nextStep'].includes(key)) {
+      return { ok: false, error: `Unexpected decision field: "${key}"` };
     }
   }
-  const assessment = output.assessment || {};
-  if (typeof assessment.summary !== 'string' || !assessment.summary.trim() || assessment.summary.length > 1000) {
-    return { ok: false, error: 'assessment.summary must be a non-empty string (max 1000 chars)' };
+  if (typeof output.assessment !== 'string' || !output.assessment.trim() || output.assessment.length > 500) {
+    return { ok: false, error: 'assessment must be a non-empty string (max 500 chars)' };
   }
-  const goal = output.goal || {};
-  if (typeof goal.description !== 'string' || !goal.description.trim() || goal.description.length > 300) {
-    return { ok: false, error: 'goal.description must be a non-empty string (max 300 chars)' };
-  }
-  let priority = Number(goal.priority);
-  if (!Number.isFinite(priority)) priority = 50;
-  priority = Math.max(0, Math.min(100, priority));
-
-  let plan = [];
-  if (output.plan !== undefined && output.plan !== null) {
-    if (!Array.isArray(output.plan)) return { ok: false, error: 'plan must be an array' };
-    if (output.plan.length > 12) return { ok: false, error: 'plan has too many steps (max 12)' };
-    for (const s of output.plan) {
-      const checked = validatePlanStep(s, knownSkillNames);
-      if (!checked.ok) return { ok: false, error: `Invalid plan step: ${checked.error}` };
-      plan.push(checked.value);
+  let goalChange = null;
+  if (output.goalChange !== undefined && output.goalChange !== null) {
+    const g = output.goalChange;
+    if (!g || typeof g !== 'object' || Array.isArray(g)) {
+      return { ok: false, error: 'goalChange must be an object or null' };
     }
+    for (const key of Object.keys(g)) {
+      if (!['description', 'priority', 'reason'].includes(key)) {
+        return { ok: false, error: `Unexpected goalChange field: "${key}"` };
+      }
+    }
+    if (typeof g.description !== 'string' || !g.description.trim() || g.description.length > 200) {
+      return { ok: false, error: 'goalChange.description must be a non-empty string (max 200 chars)' };
+    }
+    let priority = Number(g.priority);
+    if (!Number.isFinite(priority)) priority = 70;
+    priority = Math.max(0, Math.min(100, priority));
+    goalChange = {
+      description: g.description.trim(),
+      priority,
+      reason: String(g.reason || '').slice(0, 300),
+    };
   }
   if (!output.nextStep) return { ok: false, error: 'nextStep is required' };
   const next = validatePlanStep(output.nextStep, knownSkillNames);
   if (!next.ok) return { ok: false, error: `Invalid nextStep: ${next.error}` };
-
-  let proposeSkill = null;
-  if (output.proposeSkill !== undefined && output.proposeSkill !== null) {
-    const checked = validateSkill(output.proposeSkill);
-    if (!checked.ok) return { ok: false, error: `Invalid proposeSkill: ${checked.error}` };
-    proposeSkill = output.proposeSkill;
-  }
-
-  let memoryToCreate = null;
-  if (output.memoryToCreate !== undefined && output.memoryToCreate !== null) {
-    const m = output.memoryToCreate;
-    if (!m || typeof m !== 'object' || Array.isArray(m)) {
-      return { ok: false, error: 'memoryToCreate must be an object or null' };
-    }
-    if (!['semantic', 'episodic', 'world'].includes(m.kind)) {
-      return { ok: false, error: 'memoryToCreate.kind must be semantic|episodic|world' };
-    }
-    memoryToCreate = m;
-  }
-
   return {
     ok: true,
-    value: {
-      assessment: { summary: assessment.summary.trim(), immediateThreat: assessment.immediateThreat ?? null },
-      goal: {
-        description: goal.description.trim(),
-        priority,
-        reason: String(goal.reason || '').slice(0, 300),
-        changeGoal: goal.changeGoal === true,
-      },
-      plan,
-      nextStep: next.value,
-      proposeSkill,
-      memoryToCreate,
-    },
+    value: { assessment: output.assessment.trim(), goalChange, nextStep: next.value },
   };
 }
 
@@ -133,17 +109,17 @@ function needsPlanner({ interrupt = null, goalState = null, lastResult = null, t
 // small models before redesigning the contract.
 function categorizePlannerError(err) {
   const m = String((err && err.message) || err || '');
-  if (/not valid JSON|invalid JSON|Unexpected token/i.test(m)) return 'parse-failure';
+  if (/not valid JSON|invalid JSON|Unexpected token|contained no JSON/i.test(m)) return 'parse-failure';
   if (/Unknown primitive/i.test(m)) return 'unknown-primitive';
   if (/Unknown skill/i.test(m)) return 'unknown-skill';
+  if (/Unexpected decision field|Unexpected goalChange field/i.test(m)) return 'unexpected-fields';
   if (/too many steps/i.test(m)) return 'plan-too-long';
   if (/Skill .*must be|Skill has/i.test(m)) return 'skill-schema';
-  if (/missing required/i.test(m)) return 'missing-fields';
-  if (/unexpected argument|Invalid plan step|Invalid nextStep|must be one of|destination must be/i.test(m)) {
+  if (/unexpected argument|Invalid plan step|Invalid nextStep|must be one of|destination must be|goalChange/i.test(m)) {
     return 'invalid-args';
   }
   if (/Missing|required|must be/i.test(m)) return 'missing-fields';
   return 'other';
 }
 
-module.exports = { validatePlanStep, validatePlannerOutput, needsPlanner, categorizePlannerError };
+module.exports = { validatePlanStep, validateAutonomousDecision, needsPlanner, categorizePlannerError };

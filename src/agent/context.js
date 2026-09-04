@@ -7,6 +7,18 @@ const { DEFAULT_DIRECTIVE } = require('./goals');
 const { MELEE_PRIORITY } = require('../primitives/combat');
 const { FOOD_PRIORITY } = require('../primitives/survival');
 
+// Entities are presented with an explicit entityId so the model copies a
+// valid ID straight from context (attack_entity.entityId) instead of
+// inferring one from coordinates or names. `id` is kept alongside for
+// lower-level compatibility — both refer to the same Mineflayer entity.
+function groundEntities(list) {
+  return (list || []).slice(0, 20).map((e) => {
+    if (!e || typeof e !== 'object') return e;
+    const entityId = e.entityId ?? e.id ?? null;
+    return { ...e, entityId };
+  });
+}
+
 function summarizePerception(perception) {
   if (!perception) return null;
   return {
@@ -14,7 +26,7 @@ function summarizePerception(perception) {
     equipment: perception.equipment || null,
     inventory: perception.inventory || {},
     environment: perception.environment || { timeOfDay: perception.timeOfDay },
-    nearbyEntities: (perception.nearbyEntitiesDetailed || perception.nearbyEntities || []).slice(0, 20),
+    nearbyEntities: groundEntities(perception.nearbyEntitiesDetailed || perception.nearbyEntities),
     interestingBlocks: (perception.interestingBlocks || []).slice(0, 30),
     knownLocationsNearby: (perception.knownLocationsNearby || []).slice(0, 8),
   };
