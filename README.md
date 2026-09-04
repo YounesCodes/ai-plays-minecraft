@@ -114,6 +114,7 @@ npm run check
 | `OPENROUTER_API_KEY` | — | Required. Never logged. |
 | `OPENROUTER_MODEL` | `openrouter/free` | Model id. |
 | `OPENROUTER_APP_NAME` | `AI Plays Minecraft` | Sent as `X-Title`. |
+| `OPENROUTER_TIMEOUT_MS` | 60000 | HTTP timeout per LLM call (ms). |
 | `MC_HOST` / `MC_PORT` | `127.0.0.1` / `25565` | Paper server. |
 | `MC_USERNAME` | `Agent01` | Offline-auth bot name. |
 | `MC_VERSION` | `1.21.11` | Must match server. |
