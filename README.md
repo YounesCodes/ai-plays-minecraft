@@ -59,8 +59,33 @@ and backups stay outside the repo:
 ~/minecraft-lab/
 ├── server/              # paper.jar, server.properties, world/, logs/
 ├── ai-plays-minecraft/  # this repository
+├── world-snapshots/     # stored full world dirs (benchmark switching)
 └── backups/
 ```
+
+## Benchmark worlds
+
+Two concepts, never mixed automatically:
+
+- **Autonomy world** (the live `server/world`): persistent learning,
+  memories, deaths, progression. The current abused/depleted lab world is
+  deliberately kept as the hostile/stressed test world.
+- **Clean benchmark world**: fresh regen from the fixed seed `20260904`
+  for deterministic movement/resource tests.
+
+`scripts/benchmark-world.sh` swaps between them. It never deletes
+anything (the active world is always stashed first) and refuses to run
+unless Paper is stopped AND `--confirm` is passed:
+
+```bash
+scripts/benchmark-world.sh status
+scripts/benchmark-world.sh prepare fresh --confirm --seed 20260904
+scripts/benchmark-world.sh restore <snapshot-name> --confirm
+```
+
+Locomotion TEST A–F run via `node scripts/locomotion-bench.cjs --origin
+"X,Y,Z"` (prints the exact Paper console arena commands, then measures
+flat/rise/stairs/pillar/wall/ditch legs with JSONL telemetry).
 
 ## Prerequisites (Ubuntu VM on Proxmox)
 
