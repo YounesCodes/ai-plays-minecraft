@@ -91,3 +91,15 @@ test('benchmark loop completes when logs already present (no LLM)', async () => 
   assert.strictEqual(res.status, 'completed');
   assert.strictEqual(res.logs, 8);
 });
+
+test('categorizePlannerError buckets invalid planner output', () => {
+  const { categorizePlannerError } = require('../src/agent/cognition');
+  assert.strictEqual(categorizePlannerError(new Error('OpenRouter returned invalid JSON')), 'parse-failure');
+  assert.strictEqual(categorizePlannerError(new Error('Invalid plan step: Unknown primitive: fly')), 'unknown-primitive');
+  assert.strictEqual(categorizePlannerError(new Error('Invalid plan step: Unknown skill: foo')), 'unknown-skill');
+  assert.strictEqual(categorizePlannerError(new Error('plan has too many steps (max 12)')), 'plan-too-long');
+  assert.strictEqual(categorizePlannerError(new Error('Invalid proposeSkill: Skill id must be a non-empty string (max 80 chars)')), 'skill-schema');
+  assert.strictEqual(categorizePlannerError(new Error('attack_entity: unexpected argument "speed"')), 'invalid-args');
+  assert.strictEqual(categorizePlannerError(new Error('mine_block: missing required argument "x"')), 'missing-fields');
+  assert.strictEqual(categorizePlannerError(new Error('something completely different')), 'other');
+});

@@ -163,3 +163,91 @@ test('mineBlockType fails honestly when nothing is collected', async () => {
   assert.strictEqual(res.broken, 2);
   assert.match(res.error, /collected nothing/);
 });
+
+test('mine_block_type skips cached unreachable targets for alternates', async () => {
+  const targetFailures = require('../src/navigation/targetFailures');
+  targetFailures.clear();
+  const inv = [];
+  const approached = [];
+  const dug = [];
+  const bot = {
+    entity: { position: { x: 0, y: 64, z: 0 } },
+    game: { dimension: 'minecraft:overworld' },
+    inventory: { items: () => inv.slice() },
+    entities: {},
+    pathfinder: {
+      goto: async () => {},
+      stop: () => {},
+      setGoal: () => {},
+    },
+    clearControlStates: () => {},
+    findBlocks: ({ matching }) => {
+      const all = [
+        { name: 'oak_log', position: { x: 5, y: 64, z: 5 } },
+        { name: 'oak_log', position: { x: 40, y: 64, z: 40 } },
+      ];
+      return all.filter((b) => matching(b));
+    },
+    dig: async (block) => {
+      dug.push(`${block.position.x},${block.position.z}`);
+      inv.push({ name: 'oak_log', count: 1 });
+    },
+  };
+  try {
+    // Pre-seed: the near block already proved unreachable from here.
+    targetFailures.recordFailure({
+      dimension: 'minecraft:overworld',
+      kind: 'block',
+      target: 'oak_log',
+      position: { x: 5, y: 64, z: 5 },
+      reason: 'movement_stalled',
+      attemptedFrom: { x: 0, y: 64, z: 0 },
+    });
+    const { mineBlockType } = require('../src/primitives/mining');
+    const res = await mineBlockType(bot, { blockType: 'oak_log', count: 1 }, {});
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.broken, 1);
+    assert.deepStrictEqual(dug, ['40,40']); // near cached block never re-attempted
+  } finally {
+    targetFailures.clear();
+  }
+});
+
+test('mine_block_type reports no_reachable_target vs resource_not_seen', async () => {
+  const targetFailures = require('../src/navigation/targetFailures');
+  targetFailures.clear();
+  const { mineBlockType } = require('../src/primitives/mining');
+  const bot = {
+    entity: { position: { x: 0, y: 64, z: 0 } },
+    game: { dimension: 'minecraft:overworld' },
+    inventory: { items: () => [] },
+    entities: {},
+    pathfinder: { goto: async () => {}, stop: () => {}, setGoal: () => {} },
+    clearControlStates: () => {},
+    findBlocks: () => [],
+    findBlock: () => null,
+    dig: async () => {},
+  };
+  try {
+    const empty = await mineBlockType(bot, { blockType: 'oak_log', count: 1 }, {});
+    assert.strictEqual(empty.ok, false);
+    assert.strictEqual(empty.reason, 'resource_not_seen');
+
+    bot.findBlocks = () => [{ name: 'oak_log', position: { x: 6, y: 64, z: 6 } }];
+    targetFailures.recordFailure({
+      dimension: 'minecraft:overworld',
+      kind: 'block',
+      target: 'oak_log',
+      position: { x: 6, y: 64, z: 6 },
+      reason: 'timeout',
+      attemptedFrom: { x: 0, y: 64, z: 0 },
+    });
+    const blocked = await mineBlockType(bot, { blockType: 'oak_log', count: 1 }, {});
+    assert.strictEqual(blocked.ok, false);
+    assert.strictEqual(blocked.reason, 'no_reachable_target');
+    assert.strictEqual(blocked.candidatesSeen, 1);
+    assert.strictEqual(blocked.candidatesSkipped, 1);
+  } finally {
+    targetFailures.clear();
+  }
+});

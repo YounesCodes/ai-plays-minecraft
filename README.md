@@ -137,6 +137,9 @@ npm run check
 | `PRIMITIVE_TIMEOUT_MS` | 30000 | Per-primitive timeout. |
 | `SKILL_TIMEOUT_MS` | 120000 | Per-skill timeout. |
 | `BLOCK_SCAN_THROTTLE_MS` | 5000 | Block-scan cache window. |
+| `MOVEMENT_STALL_WINDOW_MS` | 4000 | No-progress window before a move is declared stalled. |
+| `MOVEMENT_STALL_MIN_PROGRESS` | 0.3 | Blocks of movement resetting the stall window. |
+| `EXPLORE_MAX_DISTANCE` | 64 | Cap for explore waypoints. |
 | `MAX_CONSECUTIVE_PLANNER_FAILURES` | 5 | Circuit-breaker threshold. |
 | `PLANNER_BACKOFF_BASE_MS` | 2000 | Retry backoff base. |
 | `MAX_CHASE_DISTANCE` | 32 | Combat chase bound. |

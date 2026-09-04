@@ -7,7 +7,7 @@ const { executePrimitive, listPrimitives } = require('../src/primitives');
 
 test('primitive registry lists the trusted set', () => {
   const names = listPrimitives().map((p) => p.name);
-  for (const expected of ['move_near', 'move_near_entity', 'move_away_from_entity', 'stop_movement', 'find_block', 'find_entity', 'equip_best_melee_weapon', 'attack_entity', 'stop_attacking', 'equip_item', 'inspect_inventory', 'eat_best_food', 'sleep', 'wait', 'mine_block', 'mine_block_type', 'craft_item', 'place_block', 'use_item', 'chat']) {
+  for (const expected of ['move_near', 'move_near_entity', 'move_away_from_entity', 'stop_movement', 'jump_forward', 'explore', 'find_block', 'find_entity', 'equip_best_melee_weapon', 'attack_entity', 'stop_attacking', 'equip_item', 'inspect_inventory', 'eat_best_food', 'sleep', 'wait', 'mine_block', 'mine_block_type', 'craft_item', 'place_block', 'use_item', 'chat']) {
     assert.ok(names.includes(expected), `missing primitive ${expected}`);
   }
   assert.ok(PRIMITIVE_NAMES.length >= 20);
@@ -233,4 +233,62 @@ test('timeout consumes the pathfinder stop flag via null goal', async () => {
     calls.some((c) => Array.isArray(c) && c[0] === 'setGoal' && c[1] === null),
     'null goal clears the flag'
   );
+});
+
+test('executePrimitive find_block skips cached unreachable candidates', async () => {
+  const targetFailures = require('../src/navigation/targetFailures');
+  targetFailures.clear();
+  const bot = {
+    entity: { position: { x: 0, y: 64, z: 0 } },
+    game: { dimension: 'minecraft:overworld' },
+    findBlocks: ({ matching }) => {
+      const all = [
+        { name: 'oak_log', position: { x: 5, y: 64, z: 5 } },
+        { name: 'oak_log', position: { x: 40, y: 64, z: 40 } },
+      ];
+      return all.filter((b) => matching(b));
+    },
+  };
+  try {
+    targetFailures.recordFailure({
+      dimension: 'minecraft:overworld',
+      kind: 'block',
+      target: 'oak_log',
+      position: { x: 5, y: 64, z: 5 },
+      reason: 'movement_stalled',
+      attemptedFrom: { x: 0, y: 64, z: 0 },
+    });
+    const res = await executePrimitive(bot, { primitive: 'find_block', args: { blockType: 'oak_log' } });
+    assert.strictEqual(res.ok, true);
+    assert.deepStrictEqual(res.position, { x: 40, y: 64, z: 40 });
+  } finally {
+    targetFailures.clear();
+  }
+});
+
+test('executePrimitive find_block reports no_reachable_target honestly', async () => {
+  const targetFailures = require('../src/navigation/targetFailures');
+  targetFailures.clear();
+  const bot = {
+    entity: { position: { x: 0, y: 64, z: 0 } },
+    game: { dimension: 'minecraft:overworld' },
+    findBlocks: () => [{ name: 'oak_log', position: { x: 6, y: 64, z: 6 } }],
+  };
+  try {
+    targetFailures.recordFailure({
+      dimension: 'minecraft:overworld',
+      kind: 'block',
+      target: 'oak_log',
+      position: { x: 6, y: 64, z: 6 },
+      reason: 'timeout',
+      attemptedFrom: { x: 0, y: 64, z: 0 },
+    });
+    const res = await executePrimitive(bot, { primitive: 'find_block', args: { blockType: 'oak_log' } });
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.reason, 'no_reachable_target');
+    assert.strictEqual(res.candidatesSeen, 1);
+    assert.strictEqual(res.candidatesSkipped, 1);
+  } finally {
+    targetFailures.clear();
+  }
 });

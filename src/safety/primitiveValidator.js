@@ -71,6 +71,10 @@ const PRIMITIVE_SCHEMAS = {
   jump_forward: {
     durationMs: { type: 'integer', required: false, min: 100, max: 2000 },
   },
+  explore: {
+    distance: { type: 'integer', required: false, min: 8, max: 64 },
+    direction: { type: 'string', required: false, enum: ['north', 'south', 'east', 'west', 'random'] },
+  },
   stop_movement: {},
   find_block: {
     blockType: { type: 'string', required: true, pattern: NAME_PATTERN, maxLength: 64 },

@@ -28,8 +28,70 @@ function countTotalInventory(bot) {
   return total;
 }
 
-const { raceWithAbort, stopBotMotion } = require('./movement');
+const { raceWithAbort, stopBotMotion, gotoWithStallWatch, goalNear } = require('./movement');
 const { matchBlockName } = require('../blocks');
+const targetFailures = require('../navigation/targetFailures');
+
+function botPos(bot) {
+  const p = bot?.entity?.position;
+  return p ? { x: p.x, y: p.y, z: p.z } : null;
+}
+
+// Bounded candidate search: prefer findBlocks (plural) for alternates so one
+// bad nearest target never blocks the run; fall back to a single findBlock.
+function findCandidates(bot, blockType, maxDistance, count = 12) {
+  const match = matchBlockName(blockType);
+  try {
+    if (bot && typeof bot.findBlocks === 'function') {
+      const found = bot.findBlocks({ matching: match, maxDistance, count });
+      if (Array.isArray(found)) return found.filter(Boolean);
+    }
+  } catch {
+    // fall through to singular search
+  }
+  try {
+    if (bot && typeof bot.findBlock === 'function') {
+      const one = bot.findBlock({ matching: match, maxDistance });
+      return one ? [one] : [];
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+function withinReach(me, pos, reach = 5) {
+  // Unknown position (mocks): assume adjacent, preserving legacy behavior.
+  if (!me || !pos) return true;
+  const dx = me.x - pos.x;
+  const dy = me.y - pos.y;
+  const dz = me.z - pos.z;
+  return dx * dx + dy * dy + dz * dz <= reach * reach;
+}
+
+// Walk adjacent to a candidate with stall/timeout/abort handling.
+async function approachCandidate(bot, block, ctx, timeoutMs = 12000) {
+  const goal = goalNear(
+    Math.floor(block.position.x), Math.floor(block.position.y), Math.floor(block.position.z), 2
+  );
+  if (!goal) return { ok: true }; // no pathfinder lib: assume reachable (mocks)
+  const res = await gotoWithStallWatch(bot, goal, { timeoutMs, primitive: 'mine_block_type', ctx });
+  if (res.outcome === 'reached') return { ok: true };
+  if (res.outcome === 'stalled') return { ok: false, reason: 'movement_stalled' };
+  if (res.outcome === 'aborted') return { ok: false, reason: 'aborted' };
+  if (res.outcome === 'timeout') return { ok: false, reason: 'timeout' };
+  return { ok: false, reason: res.error || 'no-path' };
+}
+
+function failPartial({ blockType, tool, broken, uncollected, blocks, reason, candidatesSeen, candidatesSkipped, candidatesFailed, searchRadius, error, aborted }) {
+  const out = {
+    ok: false, primitive: 'mine_block_type', block: blockType, tool,
+    broken, uncollected, blocks, reason,
+    candidatesSeen, candidatesSkipped, candidatesFailed, searchRadius, error,
+  };
+  if (aborted) out.aborted = true;
+  return out;
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -295,53 +357,109 @@ async function mineBlockType(bot, args, ctx = {}) {
   const tool = heldToolName(bot);
   const run = (async () => {
     const startCount = expectedDrop ? countItem(bot, expectedDrop) : countItem(bot, blockType);
+    const dimension = targetFailures.botDimension(bot);
     let broken = 0;
     let uncollected = 0;
     const blocks = [];
+    let candidatesSeen = 0;
+    let candidatesSkipped = 0;
+    let candidatesFailed = 0;
+    const seenKeys = new Set();
+    const partial = (reason, error) => failPartial({
+      blockType, tool, broken, uncollected, blocks, reason,
+      candidatesSeen, candidatesSkipped, candidatesFailed,
+      searchRadius: maxDistance, error,
+    });
     for (let i = 0; i < count; i++) {
       const abort = abortedCheck(ctx);
       if (abort) {
         return {
-          ok: false, primitive: 'mine_block_type', block: blockType, tool,
-          broken, uncollected, blocks, aborted: true,
-          error: `Aborted (${abort.type || 'abort'}) with ${broken}/${count} broken`,
+          ...partial('aborted', `Aborted (${abort.type || 'abort'}) with ${broken}/${count} broken`),
+          aborted: true,
         };
       }
-      let block = null;
-      try {
-        block = bot.findBlock({ matching: matchBlockName(blockType), maxDistance });
-      } catch {
-        block = null;
+      const me = botPos(bot);
+      const cands = findCandidates(bot, blockType, maxDistance, 12);
+      const eligible = [];
+      for (const c of cands) {
+        if (!c || !c.position) continue;
+        const k = `${c.position.x},${c.position.y},${c.position.z}`;
+        if (!seenKeys.has(k)) {
+          seenKeys.add(k);
+          candidatesSeen += 1;
+        }
+        if (targetFailures.isExcluded({
+          dimension, kind: 'block', target: blockType,
+          position: c.position, fromPosition: me,
+        })) {
+          candidatesSkipped += 1;
+          continue;
+        }
+        eligible.push(c);
       }
-      if (!block) {
-        const msg = `No ${blockType} found within ${maxDistance} blocks`;
-        return {
-          ok: false, primitive: 'mine_block_type', block: blockType, tool,
-          broken, uncollected, blocks,
-          error: broken > 0 ? `Only broke ${broken} of ${count}; ${msg.charAt(0).toLowerCase()}${msg.slice(1)}` : msg,
-        };
+      if (eligible.length === 0) {
+        if (candidatesSeen === 0) {
+          return partial('resource_not_seen',
+            broken > 0
+              ? `Only broke ${broken} of ${count}; no ${blockType} found within ${maxDistance} blocks`
+              : `No ${blockType} found within ${maxDistance} blocks`);
+        }
+        return partial('no_reachable_target',
+          `Only broke ${broken} of ${count}; ${candidatesSeen} candidate(s) seen, ${candidatesSkipped} skipped as unreachable`);
       }
-      const one = await breakOne(bot, block, ctx);
-      blocks.push({
-        block: block.name,
-        blockBroken: !!one.blockBroken,
-        dropSpawned: one.dropSpawned ?? null,
-        dropCollected: one.dropCollected ?? null,
-        toolWasSuitable: one.toolWasSuitable ?? null,
-        error: one.error || null,
-      });
-      if (!one.blockBroken) {
-        return {
-          ok: false, primitive: 'mine_block_type', block: blockType, tool,
-          broken, uncollected, blocks,
-          error: one.error || 'Dig failed',
-          ...(one.aborted ? { aborted: true } : {}),
-        };
+      let slotFilled = false;
+      for (const cand of eligible.slice(0, 4)) {
+        if (abortedCheck(ctx)) {
+          return {
+            ...partial('aborted', `Aborted with ${broken}/${count} broken`),
+            aborted: true,
+          };
+        }
+        if (!withinReach(me, cand.position)) {
+          const ap = await approachCandidate(bot, cand, ctx);
+          if (!ap.ok) {
+            targetFailures.recordFailure({
+              dimension, kind: 'block', target: blockType,
+              position: cand.position, reason: ap.reason, attemptedFrom: me,
+            });
+            candidatesFailed += 1;
+            continue;
+          }
+        }
+        const one = await breakOne(bot, cand, ctx);
+        blocks.push({
+          block: cand.name,
+          blockBroken: !!one.blockBroken,
+          dropSpawned: one.dropSpawned ?? null,
+          dropCollected: one.dropCollected ?? null,
+          toolWasSuitable: one.toolWasSuitable ?? null,
+          error: one.error || null,
+        });
+        if (!one.blockBroken) {
+          targetFailures.recordFailure({
+            dimension, kind: 'block', target: blockType,
+            position: cand.position, reason: 'dig-failed', attemptedFrom: me,
+          });
+          candidatesFailed += 1;
+          if (one.aborted) {
+            return {
+              ...partial('aborted', one.error || 'Dig failed'),
+              aborted: true,
+            };
+          }
+          continue;
+        }
+        broken += 1;
+        // A broken-but-uncollected block must not abort the run: the drop may
+        // still be picked up later, and the per-block detail above says why.
+        if (expectedDrop && !one.dropCollected) uncollected += 1;
+        slotFilled = true;
+        break;
       }
-      broken += 1;
-      // A broken-but-uncollected block must not abort the run: the drop may
-      // still be picked up later, and the per-block detail above says why.
-      if (expectedDrop && !one.dropCollected) uncollected += 1;
+      if (!slotFilled) {
+        return partial('no_reachable_target',
+          `Could not reach any ${blockType} nearby (seen ${candidatesSeen}, skipped ${candidatesSkipped}, failed ${candidatesFailed})`);
+      }
     }
     const endCount = expectedDrop ? countItem(bot, expectedDrop) : countItem(bot, blockType);
     const dropObtained = endCount > startCount;
@@ -349,6 +467,8 @@ async function mineBlockType(bot, args, ctx = {}) {
       return {
         ok: false, primitive: 'mine_block_type', block: blockType, tool,
         broken, uncollected, blocks, dropObtained, expectedDropObserved: expectedDrop ? false : null,
+        reason: candidatesSeen > 0 ? 'no_reachable_target' : 'resource_not_seen',
+        candidatesSeen, candidatesSkipped, candidatesFailed, searchRadius: maxDistance,
         error: `Broke ${broken} ${blockType} but collected nothing; drops are on the ground nearby`,
       };
     }

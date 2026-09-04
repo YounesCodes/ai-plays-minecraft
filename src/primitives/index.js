@@ -6,6 +6,7 @@
 
 const { validatePrimitiveCall, PRIMITIVE_NAMES, PRIMITIVE_SCHEMAS } = require('../safety/primitiveValidator');
 const movement = require('./movement');
+const exploration = require('./exploration');
 const perception = require('./perception');
 const combat = require('./combat');
 const mining = require('./mining');
@@ -19,6 +20,7 @@ const EXECUTORS = {
   move_near_entity: (bot, args, ctx) => movement.moveNearEntity(bot, args, ctx),
   move_away_from_entity: (bot, args, ctx) => movement.moveAwayFromEntity(bot, args, ctx),
   stop_movement: (bot) => movement.stopMovement(bot),
+  explore: (bot, args, ctx) => exploration.explore(bot, args, ctx),
   jump_forward: (bot, args, ctx) => movement.jumpForward(bot, args, ctx),
   find_block: (bot, args) => perception.findBlock(bot, args),
   find_entity: (bot, args) => perception.findEntity(bot, args),
@@ -43,6 +45,7 @@ const DESCRIPTIONS = {
   move_near_entity: 'Approach an entity to within distance blocks.',
   move_away_from_entity: 'Flee away from an entity by distance blocks.',
   stop_movement: 'Cancel current pathfinding movement.',
+  explore: 'Travel a bounded distance in a compass direction to discover new ground. Timeboxed, abort-aware.',
   jump_forward: 'Briefly jump forward to recover from simple stalls. No pathfinding; bounded and self-releasing.',
   find_block: 'Locate nearest block of a type within radius.',
   find_entity: 'List nearby entities, optionally filtered.',

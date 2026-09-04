@@ -15,6 +15,10 @@ const { getLimits, countLogsInInventory, isGoalComplete } = require('../safety/l
 const { createGoalManager } = require('./goals');
 const { buildContext } = require('./context');
 const { needsPlanner } = require('./cognition');
+const { categorizePlannerError } = require('./cognition');
+const targetFailures = require('../navigation/targetFailures');
+const explorationState = require('../navigation/exploration');
+const { FOOD_PRIORITY } = require('../primitives/survival');
 const { retrieveRelevant } = require('../memory/retrieval');
 const { buildReflectionPrompt, parseReflectionResponse, shouldReflect } = require('./reflection');
 const { complete } = require('../llm/openrouter');
@@ -236,6 +240,8 @@ async function runAutonomousLoop(bot, options = {}) {
     let wasDead = false;
     let abortRequested = null;
     let calmStreak = 0; // consecutive ticks with no interrupt (drives goal resume)
+    let resourceFailStreak = 0; // consecutive resource-search failures (drives exploration)
+    const recentDeaths = []; // { at, position } for relocation signals
     let step = 0;
     const seenValuables = new Set();
     const milestoneItems = new Set();
@@ -285,6 +291,12 @@ async function runAutonomousLoop(bot, options = {}) {
         continue;
       }
       if (healthBefore === null && typeof perception.health === 'number') healthBefore = perception.health;
+      try {
+        const pp = perception.position || (perception.self && perception.self.position);
+        if (pp && Number.isFinite(pp.x) && Number.isFinite(pp.z)) explorationState.recordVisit(pp.x, pp.z);
+      } catch {
+        // telemetry must never break the loop
+      }
 
       // Death / respawn handling.
       if (perception.health <= 0 || perception.self?.health <= 0) {
@@ -293,6 +305,12 @@ async function runAutonomousLoop(bot, options = {}) {
           metrics.inc('deaths');
           pushEvent({ type: 'death', step, position: perception.position });
           decisions.record('death', { step, position: perception.position });
+          try {
+            recentDeaths.push({ at: Date.now(), position: perception.position || null });
+            while (recentDeaths.length > 20) recentDeaths.shift();
+          } catch {
+            // ignore
+          }
           logger.warn(`Step ${step}: died. Waiting for respawn.`);
           if (memoryEnabled()) {
             writeEpisodicMemory({
@@ -309,6 +327,11 @@ async function runAutonomousLoop(bot, options = {}) {
       if (wasDead) {
         wasDead = false;
         logger.info(`Step ${step}: respawned. Resuming cognition.`);
+        try {
+          targetFailures.clear(); // fresh body, fresh place: forget unreachable targets
+        } catch {
+          // ignore
+        }
         decisions.record('respawned', { step, position: perception.position });
         pushEvent({ type: 'respawn', step });
         // Death reflection (best effort, non-fatal).
@@ -417,6 +440,8 @@ async function runAutonomousLoop(bot, options = {}) {
           recentEvents,
           relevantMemories: relevant,
           availableSkills: rankRelevantSkills(knownSkills, relevant),
+          exploration: explorationSummary(perception, resourceFailStreak),
+          deathSignal: deathSignalFor(recentDeaths),
         });
         try {
           const { plan: validated } = await planAutonomous({ context, knownSkillNames });
@@ -442,7 +467,7 @@ async function runAutonomousLoop(bot, options = {}) {
           consecutivePlannerFailures += 1;
           metrics.inc('llmErrors');
           logger.error(`Step ${step}: autonomous planner failed (${consecutivePlannerFailures}/${maxPlannerFailures}): ${err?.message || err}`);
-          decisions.record('planner_failed', { step, error: String(err?.message || err).slice(0, 300), consecutive: consecutivePlannerFailures });
+          decisions.record('planner_failed', { step, error: String(err?.message || err).slice(0, 300), consecutive: consecutivePlannerFailures, category: categorizePlannerError(err), model: process.env.OPENROUTER_MODEL || null });
           if (consecutivePlannerFailures >= maxPlannerFailures) {
             logger.warn(`Circuit breaker: pausing planning after ${consecutivePlannerFailures} consecutive failures.`);
             decisions.record('circuit_breaker', { step, consecutive: consecutivePlannerFailures });
@@ -453,7 +478,7 @@ async function runAutonomousLoop(bot, options = {}) {
           }
           await sleep(Math.min(30000, backoffBase * Math.pow(2, consecutivePlannerFailures - 1)));
           // Deterministic safe fallback (no LLM): eat if hungry, else wait.
-          lastResult = await safeFallback(bot, perception);
+          lastResult = await safeFallback(bot, perception, topInterrupt);
           ticksSincePlan += 1;
           await sleep(delayMs);
           continue;
@@ -525,6 +550,13 @@ async function runAutonomousLoop(bot, options = {}) {
         }
         metrics.inc('actionErrors');
       }
+      // Local-search exhaustion signal for exploration decisions: consecutive
+      // resource failures (nothing seen / nothing reachable), reset on success.
+      if (result && !result.ok && (result.reason === 'no_reachable_target' || result.reason === 'resource_not_seen' || /No .* found within|No .* within/.test(result.error || ''))) {
+        resourceFailStreak += 1;
+      } else if (result && result.ok) {
+        resourceFailStreak = 0;
+      }
       lastResult = result;
 
       // 8. Post-step perception + reflection.
@@ -565,6 +597,50 @@ function sameStep(a, b) {
     return JSON.stringify(a.args || {}) === JSON.stringify(b.args || {});
   } catch {
     return false;
+  }
+}
+
+function explorationSummary(perception, resourceFailStreak) {
+  try {
+    const p = perception && (perception.position || (perception.self && perception.self.position));
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.z)) return null;
+    const s = explorationState.summary(p.x, p.z);
+    return { ...s, localSearchExhausted: resourceFailStreak >= 3 };
+  } catch {
+    return null;
+  }
+}
+
+function deathSignalFor(recentDeaths) {
+  try {
+    const now = Date.now();
+    const windowMs = 10 * 60 * 1000;
+    const recent = (recentDeaths || []).filter((d) => now - d.at < windowMs);
+    if (recent.length === 0) return null;
+    const cells = {};
+    for (const d of recent) {
+      const p = d.position || {};
+      if (!Number.isFinite(p.x) || !Number.isFinite(p.z)) continue;
+      const k = explorationState.cellKey(p.x, p.z);
+      cells[k] = (cells[k] || 0) + 1;
+    }
+    let region = null;
+    let best = 0;
+    for (const [k, n] of Object.entries(cells)) {
+      if (n > best) {
+        best = n;
+        region = k;
+      }
+    }
+    return {
+      recentDeaths: recent.length,
+      recentDeathRegion: region,
+      repeatedFailure: recent.length >= 3
+        ? `Died ${recent.length} times recently${region ? ` near sector ${region}` : ''}; consider relocating to a safer bootstrap area`
+        : null,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -668,15 +744,55 @@ function applyMemoryProposal(m, perception, step) {
   }
 }
 
-async function safeFallback(bot, perception) {
-  // No-LLM safe default: eat when hungry, otherwise wait 1s.
+async function safeFallback(bot, perception, topInterrupt) {
+  // No-LLM safe default with survival priorities: flee an immediate hostile
+  // first (an invalid planner response must never mean standing still next
+  // to a zombie), eat when hungry and food is on hand, else wait briefly.
+  // Strategy still belongs to the LLM; this only prevents stupid deaths.
+  const { executePrimitive } = require('../primitives');
+  const toEntityId = (v) => {
+    if (v === null || v === undefined) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
   try {
+    const hostileId = (() => {
+      try {
+        const t = topInterrupt;
+        if (t && (t.type === 'immediate_threat' || t.type === 'hostile_nearby')) {
+          const fromInterrupt = toEntityId(t.entityId);
+          if (fromInterrupt !== null) return fromInterrupt;
+        }
+        const entities = perception?.nearbyEntitiesDetailed || perception?.nearbyEntities || [];
+        let best = null;
+        for (const e of entities) {
+          if (!e || e.hostile !== true || typeof e.distance !== 'number') continue;
+          if (e.distance > 16) continue;
+          if (!best || e.distance < best.distance) best = e;
+        }
+        return best ? toEntityId(best.id ?? best.entityId) : null;
+      } catch {
+        return null;
+      }
+    })();
+    if (hostileId !== null) {
+      const res = await executePrimitive(
+        bot,
+        { primitive: 'move_away_from_entity', args: { entityId: hostileId, distance: 10 } },
+        { timeoutMs: 15000 }
+      );
+      decisions.record('fallback', { action: 'move_away_from_entity', ok: !!res?.ok });
+      return res;
+    }
     const food = perception?.self?.food ?? perception?.food ?? 20;
     if (typeof food === 'number' && food <= 14) {
-      const { executePrimitive } = require('../primitives');
-      const res = await executePrimitive(bot, { primitive: 'eat_best_food', args: {} });
-      decisions.record('fallback', { action: 'eat_best_food', ok: !!res?.ok });
-      return res;
+      const names = Object.keys(perception?.inventory || {});
+      const foodSet = new Set(FOOD_PRIORITY || []);
+      if (names.some((n) => foodSet.has(n))) {
+        const res = await executePrimitive(bot, { primitive: 'eat_best_food', args: {} });
+        decisions.record('fallback', { action: 'eat_best_food', ok: !!res?.ok });
+        return res;
+      }
     }
   } catch {
     // fall through to wait
@@ -804,4 +920,4 @@ async function tryReflect({ event, goal, stateBefore, attempted, result, stateAf
   }
 }
 
-module.exports = { runAgentLoop, runBenchmarkLoop, runAutonomousLoop };
+module.exports = { runAgentLoop, runBenchmarkLoop, runAutonomousLoop, safeFallback };

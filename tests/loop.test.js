@@ -164,3 +164,43 @@ test('benchmark deaths count exactly once per death', async () => {
     .filter((t) => t === 'death');
   assert.strictEqual(deaths.length, 1);
 });
+
+test('safeFallback flees hostiles before eating or waiting', async () => {
+  const { safeFallback } = require('../src/agent/loop');
+  const bot = {
+    entity: { position: { x: 0, y: 64, z: 0 } },
+    entities: { 5: { id: 5, position: { x: 3, y: 64, z: 0 } } },
+    health: 10,
+    food: 20,
+    pathfinder: { goto: async () => {}, stop: () => {}, setGoal: () => {} },
+    clearControlStates: () => {},
+  };
+  const perception = {
+    self: { health: 10, food: 20 },
+    inventory: {},
+    nearbyEntitiesDetailed: [{ id: 5, type: 'zombie', hostile: true, distance: 5 }],
+  };
+  const res = await safeFallback(bot, perception, { type: 'immediate_threat', entityId: 5 });
+  assert.strictEqual(res.primitive, 'move_away_from_entity');
+  assert.strictEqual(res.ok, true);
+});
+
+test('safeFallback eats when hungry with food, waits otherwise', async () => {
+  const { safeFallback } = require('../src/agent/loop');
+  const bot = {
+    food: 10,
+    inventory: { items: () => [{ name: 'bread', count: 2 }] },
+    consume: async () => {
+      bot.food = 20;
+    },
+    entities: {},
+  };
+  const hungry = { self: { health: 20, food: 10 }, inventory: { bread: 2 }, nearbyEntitiesDetailed: [] };
+  const eatRes = await safeFallback(bot, hungry, null);
+  assert.strictEqual(eatRes.primitive, 'eat_best_food');
+
+  const starving = { self: { health: 20, food: 8 }, inventory: {}, nearbyEntitiesDetailed: [] };
+  const waitRes = await safeFallback({ entities: {} }, starving, null);
+  assert.strictEqual(waitRes.fallback, true);
+  assert.strictEqual(waitRes.primitive, 'wait');
+});

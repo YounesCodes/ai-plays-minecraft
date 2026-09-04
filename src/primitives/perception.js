@@ -4,6 +4,7 @@
 
 const { HOSTILE_TYPES } = require('../bot/observations');
 const { matchBlockName } = require('../blocks');
+const targetFailures = require('../navigation/targetFailures');
 
 function round1(n) {
   return Math.round(Number(n) * 10) / 10;
@@ -20,21 +21,62 @@ function distTo(bot, pos) {
 
 async function findBlock(bot, args) {
   const radius = Math.max(1, Math.min(128, Number(args.radius ?? 32) || 32));
+  const fail = (reason, extra = {}) => ({
+    ok: false, primitive: 'find_block', reason,
+    blockType: args.blockType, searchRadius: radius,
+    error: extra.error || `No ${args.blockType} within ${radius} blocks`,
+    ...extra,
+  });
   try {
-    if (typeof bot.findBlock !== 'function') {
+    if (typeof bot.findBlock !== 'function' && typeof bot.findBlocks !== 'function') {
       return { ok: false, primitive: 'find_block', error: 'Block search unavailable' };
     }
-    const block = bot.findBlock({ matching: matchBlockName(args.blockType), maxDistance: radius });
-    if (!block) {
-      return { ok: false, primitive: 'find_block', blockType: args.blockType, error: `No ${args.blockType} within ${radius} blocks` };
+    const match = matchBlockName(args.blockType);
+    let candidates = [];
+    try {
+      if (typeof bot.findBlocks === 'function') {
+        const found = bot.findBlocks({ matching: match, maxDistance: radius, count: 12 });
+        if (Array.isArray(found)) candidates = found.filter(Boolean);
+      }
+    } catch {
+      // fall through to singular search
     }
-    return {
-      ok: true,
-      primitive: 'find_block',
-      blockType: block.name || args.blockType,
-      position: { x: block.position.x, y: block.position.y, z: block.position.z },
-      distance: distTo(bot, block.position),
-    };
+    if (candidates.length === 0) {
+      try {
+        const one = bot.findBlock({ matching: match, maxDistance: radius });
+        if (one) candidates = [one];
+      } catch {
+        // ignore
+      }
+    }
+    if (candidates.length === 0) {
+      return fail('resource_not_seen', { candidatesSeen: 0, candidatesSkipped: 0 });
+    }
+    const me = bot?.entity?.position || null;
+    const dimension = targetFailures.botDimension(bot);
+    let skipped = 0;
+    for (const block of candidates) {
+      if (!block || !block.position) continue;
+      if (targetFailures.isExcluded({
+        dimension, kind: 'block', target: args.blockType,
+        position: block.position, fromPosition: me,
+      })) {
+        skipped += 1;
+        continue;
+      }
+      return {
+        ok: true,
+        primitive: 'find_block',
+        blockType: block.name || args.blockType,
+        position: { x: block.position.x, y: block.position.y, z: block.position.z },
+        distance: distTo(bot, block.position),
+      };
+    }
+    return fail('no_reachable_target', {
+      candidatesSeen: candidates.length,
+      candidatesSkipped: skipped,
+      error: `Found ${candidates.length} ${args.blockType} but all unreachable from here (${skipped} skipped)`,
+    });
   } catch (err) {
     return { ok: false, primitive: 'find_block', blockType: args.blockType, error: err?.message || 'Block search failed' };
   }

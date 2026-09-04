@@ -123,4 +123,22 @@ function needsPlanner({ interrupt = null, goalState = null, lastResult = null, t
   return { needed: false, reason: 'deterministic-progress' };
 }
 
-module.exports = { validatePlanStep, validatePlannerOutput, needsPlanner };
+// Classify invalid planner responses for telemetry (model + category, never
+// secrets). Lets us measure whether the rich schema is too ambitious for
+// small models before redesigning the contract.
+function categorizePlannerError(err) {
+  const m = String((err && err.message) || err || '');
+  if (/not valid JSON|invalid JSON|Unexpected token/i.test(m)) return 'parse-failure';
+  if (/Unknown primitive/i.test(m)) return 'unknown-primitive';
+  if (/Unknown skill/i.test(m)) return 'unknown-skill';
+  if (/too many steps/i.test(m)) return 'plan-too-long';
+  if (/Skill .*must be|Skill has/i.test(m)) return 'skill-schema';
+  if (/missing required/i.test(m)) return 'missing-fields';
+  if (/unexpected argument|Invalid plan step|Invalid nextStep|must be one of|destination must be/i.test(m)) {
+    return 'invalid-args';
+  }
+  if (/Missing|required|must be/i.test(m)) return 'missing-fields';
+  return 'other';
+}
+
+module.exports = { validatePlanStep, validatePlannerOutput, needsPlanner, categorizePlannerError };

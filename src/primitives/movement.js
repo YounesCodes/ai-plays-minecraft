@@ -319,6 +319,17 @@ function getGoals() {
   }
 }
 
+// Shared GoalNear factory (single lazy-require site for navigation code).
+function goalNear(x, y, z, range) {
+  const goals = getGoals();
+  if (!goals) return null;
+  try {
+    return new goals.GoalNear(x, y, z, range);
+  } catch {
+    return null;
+  }
+}
+
 async function moveNear(bot, args, ctx = {}) {
   const timeoutMs = ctx.timeoutMs || 30000;
   const range = Math.max(1, Math.min(8, Number(args.range ?? 2) || 2));
@@ -410,4 +421,4 @@ async function stopMovement(bot) {
   return { ok: true, primitive: 'stop_movement' };
 }
 
-module.exports = { moveNear, moveNearEntity, moveAwayFromEntity, stopMovement, findEntityById, stopBotMotion, raceWithAbort, jumpForward };
+module.exports = { moveNear, moveNearEntity, moveAwayFromEntity, stopMovement, findEntityById, stopBotMotion, raceWithAbort, jumpForward, gotoWithStallWatch: attemptGoto, goalNear };
