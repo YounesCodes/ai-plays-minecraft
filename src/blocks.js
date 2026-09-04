@@ -13,4 +13,18 @@ function matchBlockName(nameOrNames) {
   return (block) => !!block && typeof block.name === 'string' && names.has(block.name);
 }
 
-module.exports = { matchBlockName };
+// Safe blockAt(): Mineflayer's world layer calls pos.floored(), so plain
+// {x,y,z} objects throw and look like "no block". This was a live bug:
+// mine_block always reported "No solid block" and obstacle classification
+// always bailed, because both passed plain objects. Always go through here.
+function blockAtPos(bot, x, y, z) {
+  try {
+    if (!bot || typeof bot.blockAt !== 'function') return null;
+    const { Vec3 } = require('vec3');
+    return bot.blockAt(new Vec3(Math.floor(x), Math.floor(y), Math.floor(z))) || null;
+  } catch {
+    return null;
+  }
+}
+
+module.exports = { matchBlockName, blockAtPos };

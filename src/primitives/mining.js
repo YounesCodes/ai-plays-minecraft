@@ -29,7 +29,7 @@ function countTotalInventory(bot) {
 }
 
 const { raceWithAbort, stopBotMotion, gotoWithStallWatch, goalNear } = require('./movement');
-const { matchBlockName } = require('../blocks');
+const { matchBlockName, blockAtPos } = require('../blocks');
 const targetFailures = require('../navigation/targetFailures');
 
 function botPos(bot) {
@@ -305,13 +305,8 @@ async function mineBlock(bot, args, ctx = {}) {
   const tool = heldToolName(bot);
   const run = (async () => {
     try {
-      let block = null;
       const pos = { x: Math.floor(args.x), y: Math.floor(args.y), z: Math.floor(args.z) };
-      try {
-        block = bot.blockAt && bot.blockAt(pos);
-      } catch {
-        block = null;
-      }
+      let block = blockAtPos(bot, pos.x, pos.y, pos.z);
       if (!block || block.name === 'air') {
         return { ok: false, primitive: 'mine_block', error: `No solid block at ${pos.x},${pos.y},${pos.z}`, tool };
       }

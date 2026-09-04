@@ -27,6 +27,7 @@ const readline = require('readline');
 const mineflayer = require('mineflayer');
 const pathfinderPlugin = require('mineflayer-pathfinder');
 const { executePrimitive } = require('../src/primitives');
+const { blockAtPos } = require('../src/blocks');
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(name);
@@ -103,12 +104,8 @@ function sleep(ms) {
 function survey(bot, point) {
   const [x, y, z] = point;
   const name = (dx, dy, dz) => {
-    try {
-      const b = bot.blockAt({ x: x + dx, y: y + dy, z: z + dz });
-      return b ? b.name : 'unloaded';
-    } catch {
-      return 'error';
-    }
+    const b = blockAtPos(bot, x + dx, y + dy, z + dz);
+    return b ? b.name : 'unloaded';
   };
   return { ground: name(0, -1, 0), feet: name(0, 0, 0), head: name(0, 1, 0) };
 }
@@ -164,8 +161,23 @@ async function main() {
   for (const t of TESTS) {
     const [sx, sy, sz] = t.start;
     const [gx, gy, gz] = t.goal;
-    await waitEnter(`\nTEST ${t.name} (${t.note}): paste  tp ${USER} ${sx} ${sy} ${sz}`);
-    await sleep(2000); // let chunks settle after the teleport
+    // Setup guard: the leg is only valid if the bot actually reached S.
+    // A stale/missed teleport otherwise silently invalidates the measurement
+    // (observed live: records attributed to the wrong leg). One retry, then
+    // record the leg as setup-mismatch without dispatching any movement.
+    let ready = false;
+    for (let attempt = 0; attempt < 2 && !ready; attempt++) {
+      if (attempt > 0) console.log('  re-paste the tp command above.');
+      await waitEnter(`\nTEST ${t.name} (${t.note}): paste  tp ${USER} ${sx} ${sy} ${sz}`);
+      await sleep(2000); // let chunks settle after the teleport
+      const here = posOf(bot);
+      const off = here ? horiz(here, { x: sx, z: sz }) : null;
+      if (off !== null && off <= 8) {
+        ready = true;
+        break;
+      }
+      console.log(`  bot at ${JSON.stringify(here)}, expected near (${sx},${sy},${sz}).`);
+    }
     const siteStart = survey(bot, t.start);
     const siteGoal = survey(bot, t.goal);
     console.log(`  site S(${sx},${sy},${sz}): ground=${siteStart.ground} feet=${siteStart.feet} head=${siteStart.head}`);
@@ -173,18 +185,25 @@ async function main() {
     const start = posOf(bot);
     const t0 = Date.now();
     let res;
-    try {
-      res = await Promise.race([
-        executePrimitive(bot, { primitive: 'move_near', args: { x: gx, y: gy, z: gz } }, { timeoutMs: TIMEOUT_MS }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('runner timeout')), TIMEOUT_MS + 15000)),
-      ]);
-    } catch (err) {
-      res = { ok: false, primitive: 'move_near', error: err?.message || 'runner failed' };
+    let setupMismatch = false;
+    if (!ready) {
+      setupMismatch = true;
+      res = { ok: false, primitive: 'move_near', error: 'setup-mismatch: bot never reached the start; leg invalid, no movement dispatched' };
+    } else {
+      try {
+        res = await Promise.race([
+          executePrimitive(bot, { primitive: 'move_near', args: { x: gx, y: gy, z: gz } }, { timeoutMs: TIMEOUT_MS }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('runner timeout')), TIMEOUT_MS + 15000)),
+        ]);
+      } catch (err) {
+        res = { ok: false, primitive: 'move_near', error: err?.message || 'runner failed' };
+      }
     }
     const elapsedMs = Date.now() - t0;
     const end = posOf(bot);
     const record = {
       test: t.name,
+      setupMismatch,
       site: { start: siteStart, goal: siteGoal },
       startPosition: start,
       goalPosition: { x: gx, y: gy, z: gz },

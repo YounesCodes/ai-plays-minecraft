@@ -251,3 +251,23 @@ test('mine_block_type reports no_reachable_target vs resource_not_seen', async (
     targetFailures.clear();
   }
 });
+
+test('mine_block works when blockAt requires Vec3', async () => {
+  const inv = [];
+  const bot = baseBot({
+    inventory: { items: () => inv.slice() },
+    entities: {},
+    blockAt: (p) => {
+      if (typeof p.floored !== 'function') throw new Error('pos.floored is not a function');
+      return { name: 'stone', position: { x: 1, y: 2, z: 3 } };
+    },
+    dig: async () => {
+      inv.push({ name: 'cobblestone', count: 1 });
+    },
+  });
+
+  const { mineBlock } = require('../src/primitives/mining');
+  const res = await mineBlock(bot, { x: 1, y: 2, z: 3 }, {});
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.blockBroken, true);
+});

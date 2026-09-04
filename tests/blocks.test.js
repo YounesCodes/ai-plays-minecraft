@@ -23,3 +23,23 @@ test('matchBlockName accepts arrays and ignores non-strings', () => {
   assert.strictEqual(match({ name: 'birch_log' }), true);
   assert.strictEqual(match({ name: 'stone' }), false);
 });
+
+test('blockAtPos passes a floored Vec3 (plain objects throw in real Mineflayer)', () => {
+  const { Vec3 } = require('vec3');
+  const seen = [];
+  const bot = {
+    blockAt: (p) => {
+      if (typeof p.floored !== 'function') throw new Error('pos.floored is not a function');
+      seen.push([p.x, p.y, p.z]);
+      return { name: 'stone', position: p };
+    },
+  };
+  const { blockAtPos } = require('../src/blocks');
+  const block = blockAtPos(bot, 1.7, 2.2, 3.9);
+  assert.strictEqual(block.name, 'stone');
+  assert.deepStrictEqual(seen, [[1, 2, 3]]);
+  assert.strictEqual(blockAtPos(bot, 1, 2, 3) instanceof Object, true);
+  assert.strictEqual(blockAtPos({}, 1, 2, 3), null);
+  assert.strictEqual(blockAtPos({ blockAt: () => { throw new Error('nope'); } }, 1, 2, 3), null);
+  void Vec3;
+});

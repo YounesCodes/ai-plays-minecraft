@@ -2,6 +2,8 @@
 
 // Interaction primitives: place blocks, use/activate items, chat.
 
+const { blockAtPos } = require('../blocks');
+
 const FACE_VECTORS = {
   top: [0, 1, 0],
   bottom: [0, -1, 0],
@@ -27,7 +29,7 @@ async function placeBlock(bot, args) {
       return { ok: false, primitive: 'place_block', item: args.item, error: 'Block placement unavailable' };
     }
     const refPos = { x: Math.floor(args.x), y: Math.floor(args.y), z: Math.floor(args.z) };
-    const refBlock = bot.blockAt(refPos);
+    const refBlock = blockAtPos(bot, refPos.x, refPos.y, refPos.z);
     if (!refBlock) {
       return { ok: false, primitive: 'place_block', item: args.item, error: `No reference block at ${refPos.x},${refPos.y},${refPos.z}` };
     }

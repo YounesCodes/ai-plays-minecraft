@@ -3,6 +3,8 @@
 // Movement primitives. All bounded, all return structured results, never throw
 // for ordinary Minecraft failures (no path, no target).
 
+const { blockAtPos } = require('../blocks');
+
 function stopBotMotion(bot) {
   try {
     if (bot.pathfinder && typeof bot.pathfinder.stop === 'function') bot.pathfinder.stop();
@@ -231,9 +233,9 @@ function classifyObstacle(bot) {
     const fx = Math.round(p.x - Math.sin(yaw));
     const fz = Math.round(p.z - Math.cos(yaw));
     const fy = Math.floor(p.y);
-    const feet = bot.blockAt({ x: fx, y: fy, z: fz });
-    const head = bot.blockAt({ x: fx, y: fy + 1, z: fz });
-    const above = bot.blockAt({ x: fx, y: fy + 2, z: fz });
+    const feet = blockAtPos(bot, fx, fy, fz);
+    const head = blockAtPos(bot, fx, fy + 1, fz);
+    const above = blockAtPos(bot, fx, fy + 2, fz);
     if (!feet) return { simple: false, reason: 'no-data' };
     const solid = (b) => !!b && b.boundingBox === 'block';
     if (solid(feet) && !solid(head) && !solid(above)) {
