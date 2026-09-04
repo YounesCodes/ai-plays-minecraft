@@ -58,6 +58,12 @@ function buildSystemPromptAutonomous(directive, skills = []) {
     'nextStep.type is "primitive" or "skill". For skills: {"type":"skill","name":"<skill name>","args":{...}}.',
     'proposeSkill, when set, must be a full declarative skill object using ONLY trusted primitives.',
     'memoryToCreate, when set: {"kind":"semantic|episodic|world","subject":"...","content":"...","confidence":0.7} or {"kind":"world","name":"...","position":{"x":0,"y":64,"z":0}}.',
+    'Strict contract — violations reject the whole plan, so obey exactly:',
+    '- Top-level keys: exactly assessment, goal, plan, nextStep, proposeSkill, memoryToCreate. No extras.',
+    '- assessment.summary: non-empty, max 1000 chars. goal.description: non-empty, max 300 chars; priority 0-100.',
+    '- plan: array of AT MOST 12 steps; each step {"type":"primitive"|"skill","name":"...","args":{...}} using real primitive names with valid args.',
+    '- nextStep is REQUIRED and follows the same step shape.',
+    '- proposeSkill: null, or a COMPLETE skill {"id":"...","name":"...","description":"...","parameters":[],"steps":[{"primitive":"...","args":{...}}]} where id is non-empty (max 80 chars), description non-empty (max 500), parameters is an array (max 8), steps is 1-12 entries each naming a trusted primitive. NEVER send a partial or placeholder skill — when in doubt, use null. A bad proposal fails the entire plan.',
     'Plans are intentions, not scripts: normally only nextStep executes, then we re-observe.',
   ].join('\n');
 }
