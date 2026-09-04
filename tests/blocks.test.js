@@ -43,3 +43,14 @@ test('blockAtPos passes a floored Vec3 (plain objects throw in real Mineflayer)'
   assert.strictEqual(blockAtPos({ blockAt: () => { throw new Error('nope'); } }, 1, 2, 3), null);
   void Vec3;
 });
+
+test('findItemOrBlock works across minecraft-data versions', () => {
+  const { findItemOrBlock } = require('../src/blocks');
+  const modern = { itemsByName: { stick: { id: 1, name: 'stick' } }, blocksByName: { stone: { id: 2, name: 'stone' } } };
+  assert.deepStrictEqual(findItemOrBlock(modern, 'stick'), { id: 1, name: 'stick' });
+  assert.deepStrictEqual(findItemOrBlock(modern, 'stone'), { id: 2, name: 'stone' });
+  assert.strictEqual(findItemOrBlock(modern, 'nope'), null);
+  const legacy = { findItemOrBlockByName: (n) => (n === 'old' ? { id: 9 } : null) };
+  assert.deepStrictEqual(findItemOrBlock(legacy, 'old'), { id: 9 });
+  assert.strictEqual(findItemOrBlock(null, 'x'), null);
+});

@@ -27,4 +27,21 @@ function blockAtPos(bot, x, y, z) {
   }
 }
 
-module.exports = { matchBlockName, blockAtPos };
+// Item/block lookup across minecraft-data versions: findItemOrBlockByName
+// does not exist in newer releases; itemsByName/blocksByName dictionaries
+// are the stable API (verified live: the old call broke all crafting).
+function findItemOrBlock(mcData, name) {
+  try {
+    if (!mcData || typeof name !== 'string') return null;
+    if (mcData.itemsByName && mcData.itemsByName[name]) return mcData.itemsByName[name];
+    if (mcData.blocksByName && mcData.blocksByName[name]) return mcData.blocksByName[name];
+    if (typeof mcData.findItemOrBlockByName === 'function') {
+      return mcData.findItemOrBlockByName(name) || null;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+module.exports = { matchBlockName, blockAtPos, findItemOrBlock };

@@ -1,6 +1,6 @@
 'use strict';
 
-const { matchBlockName } = require('../blocks');
+const { matchBlockName, findItemOrBlock } = require('../blocks');
 
 function getMinecraftData(version) {
   try {
@@ -26,7 +26,7 @@ async function craftItem(bot, itemName, count = 1) {
   if (!mcData) {
     return { ok: false, error: `Unsupported Minecraft version: ${bot.version}` };
   }
-  const item = mcData.findItemOrBlockByName(itemName);
+  const item = findItemOrBlock(mcData, itemName);
   if (!item) {
     return { ok: false, error: `Unknown item: ${itemName}` };
   }

@@ -1,6 +1,6 @@
 'use strict';
 
-const { matchBlockName } = require('../blocks');
+const { matchBlockName, findItemOrBlock } = require('../blocks');
 
 // Crafting primitive (trusted): recipe lookup + craft, bounded count.
 
@@ -19,7 +19,7 @@ async function craftItem(bot, args) {
   if (!mcData) {
     return { ok: false, primitive: 'craft_item', item: itemName, error: `Unsupported Minecraft version: ${bot.version}` };
   }
-  const item = mcData.findItemOrBlockByName(itemName);
+  const item = findItemOrBlock(mcData, itemName);
   if (!item) {
     return { ok: false, primitive: 'craft_item', item: itemName, error: `Unknown item: ${itemName}` };
   }

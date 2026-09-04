@@ -271,3 +271,18 @@ test('mine_block works when blockAt requires Vec3', async () => {
   assert.strictEqual(res.ok, true);
   assert.strictEqual(res.blockBroken, true);
 });
+
+test('craft lookup resolves real item names', async () => {
+  const { craftItem } = require('../src/primitives/crafting');
+  const unknown = await craftItem({ version: '1.21.11' }, { item: 'not_a_real_item_xyz', count: 1 });
+  assert.strictEqual(unknown.ok, false);
+  assert.match(unknown.error, /Unknown item/);
+  const bot = {
+    version: '1.21.11',
+    inventory: { items: () => [{ name: 'oak_log', count: 4 }] },
+    recipesFor: () => [],
+  };
+  const noRecipe = await craftItem(bot, { item: 'oak_planks', count: 1 });
+  assert.strictEqual(noRecipe.ok, false);
+  assert.match(noRecipe.error, /recipe/i);
+});
