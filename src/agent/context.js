@@ -97,7 +97,7 @@ function summarizeOpportunities(perception, maxGroups = 6) {
   return out;
 }
 
-function buildContext({ directive, goalState, perception, lastResult = null, recentEvents = [], relevantMemories = {}, availableSkills = [], model = null, exploration = null, deathSignal = null, actionHistory = [], stagnation = null, oscillation = null }) {
+function buildContext({ directive, goalState, perception, lastResult = null, recentEvents = [], relevantMemories = {}, availableSkills = [], model = null, exploration = null, deathSignal = null, actionHistory = [], stagnation = null, oscillation = null, curriculum = null }) {
   return {
     directive: directive || process.env.AGENT_DIRECTIVE || DEFAULT_DIRECTIVE,
     currentGoal: goalState?.currentGoal || null,
@@ -108,6 +108,9 @@ function buildContext({ directive, goalState, perception, lastResult = null, rec
     actionHistory: Array.isArray(actionHistory) ? actionHistory.slice(-6) : [],
     stagnation: stagnation && stagnation.detected ? stagnation : { detected: false },
     oscillation: oscillation && oscillation.detected ? oscillation : { detected: false },
+    curriculum: curriculum && curriculum.activeMilestone
+      ? { activeMilestone: { id: curriculum.activeMilestone.id, description: curriculum.activeMilestone.description, recipe: curriculum.activeMilestone.recipe || null }, completed: (curriculum.completedMilestones || []).slice() }
+      : { activeMilestone: null, completed: ((curriculum && curriculum.completedMilestones) || []).slice() },
     lastResult: lastResult ? JSON.parse(JSON.stringify(lastResult, (k, v) => (typeof v === 'function' ? undefined : v))) : null,
     recentImportantEvents: Array.isArray(recentEvents) ? recentEvents.slice(-8) : [],
     relevantMemories: {

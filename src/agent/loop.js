@@ -16,6 +16,7 @@ const { createGoalManager } = require('./goals');
 const { buildContext } = require('./context');
 const { categorizePlannerError } = require('./cognition');
 const { createActionHistory } = require('./actionHistory');
+const { createCurriculumManager } = require('../curriculum/manager');
 const targetFailures = require('../navigation/targetFailures');
 const explorationState = require('../navigation/exploration');
 const { FOOD_PRIORITY } = require('../primitives/survival');
@@ -46,10 +47,6 @@ function memoryEnabled() {
 
 function reflectionEnabled() {
   return process.env.REFLECTION_ENABLED !== 'false' && process.env.REFLECTION_ENABLED !== '0';
-}
-
-function skillGenEnabled() {
-  return process.env.SKILL_GENERATION_ENABLED !== 'false' && process.env.SKILL_GENERATION_ENABLED !== '0';
 }
 
 function loadStores() {
@@ -222,11 +219,17 @@ async function runAutonomousLoop(bot, options = {}) {
     const backoffBase = limits.plannerBackoffBaseMs;
 
     const goalManager = createGoalManager({ directive });
-    goalManager.setGoal('Survive the first day: gather wood, find food, and seek shelter before night', {
-      priority: 60,
-      reason: 'Default early-survival goal until the planner decides otherwise',
-      subgoals: ['collect wood', 'find food', 'assess surroundings'],
-    });
+    // Stone-age curriculum owns the normal strategic goal (no hard-coded
+    // startup goal): the first curriculum tick below sets it from actual
+    // inventory/world state, so resumed runs skip satisfied milestones.
+    const curriculum = createCurriculumManager();
+    const curriculumSession = {};
+    let curriculumStarted = false;
+    // Description last written BY curriculum sync. A model goalChange to
+    // something else is a genuine strategic override and sticks: sync only
+    // creates the initial goal or advances its own previous goal, never
+    // stomps a model decision the very next tick.
+    let lastCurriculumGoal = null;
 
     const cache = createPerceptionCache();
     const worldMemory = memoryEnabled() ? require('../memory/world') : null;
@@ -392,6 +395,53 @@ async function runAutonomousLoop(bot, options = {}) {
         calmStreak = 0;
       }
 
+      // 2b. Curriculum tick (deterministic progression). Skipped while an
+      // emergency goal is active — suspension/resume keep working, and the
+      // next calm tick re-syncs any stale resumed description.
+      let curriculumView = { activeMilestone: null, completedMilestones: [] };
+      try {
+        const gsNow = goalManager.getState();
+        if (!gsNow.currentGoal?.emergency) {
+          try {
+            const flag = curriculum.noteOutcome(lastResult);
+            if (flag) Object.assign(curriculumSession, flag);
+          } catch {
+            // ignore
+          }
+          const tickState = curriculum.tick({
+            inventory: (perception && perception.inventory) || {},
+            nearbyBlocks: (perception && perception.interestingBlocks) || [],
+            session: curriculumSession,
+            mcVersion: (bot && bot.version) || process.env.MC_VERSION || '1.21.11',
+          });
+          curriculumView = { activeMilestone: tickState.activeMilestone, completedMilestones: tickState.completedMilestones };
+          if (!curriculumStarted) {
+            curriculumStarted = true;
+            decisions.record('curriculum_started', { step, active: tickState.activeMilestone ? tickState.activeMilestone.id : null, completed: tickState.completedMilestones });
+          }
+          for (const id of tickState.newlySkipped || []) {
+            decisions.record('milestone_skipped_already_satisfied', { step, milestone: id });
+          }
+          for (const id of tickState.newlyCompleted || []) {
+            decisions.record('milestone_completed', { step, milestone: id, inventory: summarizeInventoryCounts(perception) });
+          }
+          if (tickState.activeMilestone && tickState.activeChanged) {
+            decisions.record('milestone_selected', { step, milestone: tickState.activeMilestone.id, reason: tickState.activeMilestone.reason });
+          }
+          const want = tickState.activeMilestone;
+          const have = gsNow.currentGoal;
+          if (want && shouldCurriculumSync(have, want, lastCurriculumGoal)) {
+            const prev = have?.description || null;
+            goalManager.setGoal(want.description, { priority: 70, reason: `Curriculum milestone: ${want.id}`, subgoals: [] });
+            metrics.inc('goalChanges');
+            decisions.record('goal_changed', { from: prev, to: want.description, reason: `curriculum:${want.id}`, step });
+            lastCurriculumGoal = want.description;
+          }
+        }
+      } catch {
+        // curriculum must never break the loop
+      }
+
       // 3. Memory retrieval (bounded, deterministic).
       const stores = loadStores();
       let relevant = { semantic: [], episodic: [], procedural: [], world: [] };
@@ -457,6 +507,7 @@ async function runAutonomousLoop(bot, options = {}) {
           actionHistory: actionHistory.summary(),
           stagnation,
           oscillation,
+          curriculum: curriculumView,
         });
         try {
           const { decision: validated } = await planAutonomous({ context, knownSkillNames });
@@ -653,6 +704,31 @@ function recentProgress(actionHistory, last = 4) {
   } catch {
     return false;
   }
+}
+
+// Pure sync rule (exported for tests): curriculum creates the initial goal
+// and advances its own previous goal. A differing current goal means the
+// model (or emergency resume) owns it — leave it alone.
+function shouldCurriculumSync(currentGoal, wantMilestone, lastCurriculumGoal) {
+  if (!wantMilestone) return false;
+  if (!currentGoal) return true;
+  return currentGoal.description === lastCurriculumGoal && currentGoal.description !== wantMilestone.description;
+}
+
+// Compact inventory counts for milestone telemetry (top items only).
+function summarizeInventoryCounts(perception) {
+  const out = {};
+  try {
+    const inv = (perception && perception.inventory) || {};
+    const entries = Object.entries(inv)
+      .filter(([, n]) => Number.isFinite(Number(n)) && Number(n) > 0)
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+      .slice(0, 8);
+    for (const [name, count] of entries) out[name] = Number(count);
+  } catch {
+    // ignore
+  }
+  return out;
 }
 
 function explorationSummary(perception, resourceFailStreak) {
@@ -877,42 +953,30 @@ async function tryReflect({ event, goal, stateBefore, attempted, result, stateAf
     const parsed = parseReflectionResponse(res.content);
     if (!parsed.ok) {
       metrics.inc('llmErrors');
-      decisions.record('reflection_failed', { step, error: parsed.error });
+      metrics.inc('reflectionInvalid');
+      decisions.record('reflection_failed', { step, reflectionContract: 'reflection-v2', error: parsed.error });
       return null;
     }
     const r = parsed.value;
     metrics.inc('reflections');
-    decisions.record('reflection', { step, summary: r.summary.slice(0, 300), lesson: (r.lesson || '').slice(0, 300) });
+    metrics.inc('reflectionValid');
+    decisions.record('reflection', { step, reflectionContract: 'reflection-v2', summary: r.summary.slice(0, 300), lesson: (r.lesson || '').slice(0, 300), memory: r.memory ? r.memory.kind : null });
     logger.info(`Reflection: ${r.summary}`);
 
-    if (memoryEnabled()) {
-      if (r.storeSemanticMemory && r.semanticMemory) {
-        const w = writeSemanticMemory({ ...r.semanticMemory, source: 'reflection' });
-        if (w?.ok) metrics.inc('memoriesWritten');
-      }
-      if (r.storeEpisodicMemory && r.episodicMemory) {
-        const w = writeEpisodicMemory({ ...r.episodicMemory, context: { position: stateAfter?.position || null } });
-        if (w?.ok) metrics.inc('memoriesWritten');
-      }
-    }
-    if (r.changeGoal && r.suggestedGoal && goalManager) {
-      const prev = goalManager.getState().currentGoal?.description || null;
-      goalManager.setGoal(r.suggestedGoal, { priority: 70, reason: r.suggestedGoalReason || r.summary });
-      metrics.inc('goalChanges');
-      decisions.record('goal_changed', { from: prev, to: r.suggestedGoal, reason: 'reflection', step });
-    }
-    if (r.reviseSkill && skillGenEnabled()) {
+    // At most one memory per reflection; no goal changes, no skill work.
+    // Goal management belongs to cognition/curriculum.
+    if (memoryEnabled() && r.memory) {
       try {
-        const { validateSkill } = require('../safety/skillValidator');
-        const check = validateSkill(r.reviseSkill);
-        if (check.ok) {
-          const put = skillLibrary.put(r.reviseSkill);
-          if (put?.ok) {
-            metrics.inc('skillsGenerated');
-            decisions.record('skill_revised', { id: r.reviseSkill.id, step });
-          }
-        } else {
-          decisions.record('skill_rejected', { id: r.reviseSkill?.id || null, error: check.error, step });
+        if (r.memory.kind === 'semantic') {
+          const w = writeSemanticMemory({ ...r.memory, source: 'reflection' });
+          if (w?.ok) metrics.inc('memoriesWritten');
+        } else if (r.memory.kind === 'episodic') {
+          const w = writeEpisodicMemory({
+            summary: r.memory.summary,
+            lesson: r.memory.lesson || '',
+            context: { position: stateAfter?.position || null },
+          });
+          if (w?.ok) metrics.inc('memoriesWritten');
         }
       } catch {
         // ignore
@@ -921,9 +985,10 @@ async function tryReflect({ event, goal, stateBefore, attempted, result, stateAf
     return r;
   } catch (err) {
     metrics.inc('llmErrors');
-    decisions.record('reflection_failed', { step, error: String(err?.message || err).slice(0, 300) });
+    metrics.inc('reflectionInvalid');
+    decisions.record('reflection_failed', { step, reflectionContract: 'reflection-v2', error: String(err?.message || err).slice(0, 300) });
     return null;
   }
 }
 
-module.exports = { runAgentLoop, runBenchmarkLoop, runAutonomousLoop, safeFallback };
+module.exports = { runAgentLoop, runBenchmarkLoop, runAutonomousLoop, safeFallback, shouldCurriculumSync };

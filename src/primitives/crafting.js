@@ -41,11 +41,24 @@ async function craftItem(bot, args) {
     return { ok: false, primitive: 'craft_item', item: itemName, error: err?.message || 'Failed to look up recipe' };
   }
   if (recipes.length === 0) {
+    // Structured diagnosis from the installed recipe APIs (no guessing):
+    // recipesFor(..., true) answers "would materials suffice WITH a table?".
+    // Table-required + materials-ready + no table nearby => the planner
+    // must place/find a table, not farm more materials.
+    let reason = 'missing_materials';
+    try {
+      if (typeof bot.recipesFor === 'function') {
+        const withTable = bot.recipesFor(item.id, null, n, true) || [];
+        if (withTable.length > 0 && !table) reason = 'crafting_table_required';
+      }
+    } catch {
+      // keep default; diagnostics stay bounded, never throw
+    }
     return {
-      ok: false, primitive: 'craft_item', item: itemName,
-      error: table
-        ? `No recipe available for ${itemName} (missing materials)`
-        : `No recipe available for ${itemName} (need materials or crafting table nearby)`,
+      ok: false, primitive: 'craft_item', item: itemName, reason,
+      error: reason === 'crafting_table_required'
+        ? `Cannot craft ${itemName}: materials ready but no crafting table nearby (place one with place_block_nearby)`
+        : `No recipe available for ${itemName} (missing materials)`,
     };
   }
   try {

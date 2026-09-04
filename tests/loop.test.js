@@ -73,18 +73,22 @@ function clearEnv() {
   delete process.env.LOG_DIR;
 }
 
-function decisionTypes(tmp) {
+function readDecisions(tmp) {
   const raw = fs.readFileSync(path.join(tmp, 'decisions.jsonl'), 'utf8');
   return raw
     .split('\n')
     .filter(Boolean)
     .map((l) => {
       try {
-        return JSON.parse(l).type;
+        return JSON.parse(l);
       } catch {
-        return '?';
+        return { type: '?' };
       }
     });
+}
+
+function decisionTypes(tmp) {
+  return readDecisions(tmp).map((d) => d.type);
 }
 
 test('autonomous loop plans fresh every tick and never replays completed actions', async () => {
@@ -120,9 +124,13 @@ test('autonomous loop plans fresh every tick and never replays completed actions
     // call per tick, zero framework-generated repeats.
     assert.strictEqual(plannerCalls, 5);
     assert.deepStrictEqual(executed, [stepA, stepC, stepA, stepC, stepA]);
-    // goalChange:null must NOT replace the loop's default goal.
+    // goalChange:null must NOT replace the curriculum goal; only the
+    // curriculum bootstrap itself may set it once (from null).
+    const raw = readDecisions(tmp);
+    const changes = raw.filter((d) => d.type === 'goal_changed');
+    assert.strictEqual(changes.length, 1);
+    assert.match(changes[0].reason || '', /^curriculum:/);
     const types = decisionTypes(tmp);
-    assert.ok(!types.includes('goal_changed'), `unexpected goal changes: ${types.join(',')}`);
     assert.ok(!types.includes('repeat'), 'framework must never replay completed actions');
     assert.strictEqual(types.filter((t) => t === 'decision').length, 5);
   } finally {
@@ -144,8 +152,12 @@ test('goalChange replaces the goal exactly once', async () => {
     };
     stubBehavior.executeNextStep = async () => ({ ok: true });
     await runAgentLoop(mockBot(), { mode: 'autonomous', maxSteps: 3, decisionDelayMs: 1, directive: 'test' });
+    // One curriculum bootstrap change + one genuine model goalChange.
+    const changes = readDecisions(tmp).filter((d) => d.type === 'goal_changed');
+    assert.strictEqual(changes.length, 2);
+    assert.match(changes[0].reason || '', /^curriculum:/);
+    assert.ok(!(changes[1].reason || '').startsWith('curriculum:'));
     const types = decisionTypes(tmp);
-    assert.strictEqual(types.filter((t) => t === 'goal_changed').length, 1);
   } finally {
     clearEnv();
   }

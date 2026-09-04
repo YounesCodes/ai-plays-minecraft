@@ -120,6 +120,9 @@ const PRIMITIVE_SCHEMAS = {
     z: { type: 'number', required: true, min: -30000000, max: 30000000 },
     face: { type: 'string', required: false, enum: ['top', 'bottom', 'north', 'south', 'east', 'west'] },
   },
+  place_block_nearby: {
+    item: ITEM_NAME,
+  },
   use_item: {
     item: OPTIONAL_ITEM_NAME,
   },

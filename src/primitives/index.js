@@ -36,6 +36,7 @@ const EXECUTORS = {
   mine_block_type: (bot, args, ctx) => mining.mineBlockType(bot, args, ctx),
   craft_item: (bot, args) => crafting.craftItem(bot, args),
   place_block: (bot, args) => interaction.placeBlock(bot, args),
+  place_block_nearby: (bot, args, ctx) => interaction.placeBlockNearby(bot, args, ctx),
   use_item: (bot, args) => interaction.useItem(bot, args),
   chat: (bot, args) => interaction.chat(bot, args),
 };
@@ -61,6 +62,7 @@ const DESCRIPTIONS = {
   mine_block_type: 'Acquire matching blocks LOCALLY. Beyond-range candidates are deferred; if requiresRelocation=true, explore instead of retrying.',
   craft_item: 'Craft count of an item using nearby table if needed.',
   place_block: 'Place an inventory block against a reference block.',
+  place_block_nearby: 'Place an inventory block on a nearby suitable surface the body selects. No coordinates needed. Returns the placed position.',
   use_item: 'Activate (right-click) the held or named item.',
   chat: 'Send a short chat message.',
 };

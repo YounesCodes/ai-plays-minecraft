@@ -14,6 +14,14 @@ function containsForbidden(obj) {
   return null;
 }
 
+// Slim reflection contract (reflection-v2): one lesson per call, at most
+// one memory, no goal changes, no skill revisions. Goal management belongs
+// to cognition/curriculum; skill work belongs to a future separate path.
+// The old rich contract failed live ~30% of the time (malformed memory
+// subfields, changeGoal without suggestedGoal) — one bad subfield must no
+// longer sink the whole reflection.
+const REFLECTION_CONTRACT = 'reflection-v2';
+
 function buildReflectionPrompt({ goal, stateBefore, attempted, result, stateAfter, relevantMemories }) {
   return [
     'You are reflecting on a Minecraft survival agent\'s recent experience.',
@@ -25,9 +33,11 @@ function buildReflectionPrompt({ goal, stateBefore, attempted, result, stateAfte
     `Relevant memories: ${JSON.stringify(relevantMemories || {}).slice(0, 2000)}`,
     '',
     'Output exactly one JSON object, no commentary:',
-    '{"summary":"...","lesson":"...","storeSemanticMemory":true,"semanticMemory":{"subject":"...","content":"...","confidence":0.8},"storeEpisodicMemory":true,"episodicMemory":{"summary":"...","lesson":"..."},"changeGoal":false,"suggestedGoal":null,"suggestedGoalReason":"","reviseSkill":null}',
-    'Set store flags false with null payloads when nothing is worth storing.',
-    'reviseSkill, if set, must be a full declarative skill object (validated later).',
+    '{"summary":"what happened","lesson":"general reusable lesson","memory":null}',
+    'or, when genuinely worth remembering:',
+    '{"summary":"...","lesson":"...","memory":{"kind":"semantic","subject":"...","content":"...","confidence":0.8}}',
+    'memory.kind is "semantic" (fact/lesson) or "episodic" (event summary+lesson). At most one memory. Null when nothing is worth storing.',
+    'Top-level keys: exactly summary, lesson, memory. No goal changes, no skill proposals — extras reject the reflection.',
   ].join('\n');
 }
 
@@ -37,75 +47,75 @@ function validateReflection(output) {
   }
   const bad = containsForbidden(output);
   if (bad) return { ok: false, error: `Forbidden field in reflection: "${bad}"` };
-  if (typeof output.summary !== 'string' || !output.summary.trim() || output.summary.length > 1000) {
-    return { ok: false, error: 'summary must be a non-empty string (max 1000 chars)' };
+  for (const key of Object.keys(output)) {
+    if (!['summary', 'lesson', 'memory'].includes(key)) {
+      return { ok: false, error: `Unexpected reflection field: "${key}"` };
+    }
   }
-  if (output.lesson !== undefined && (typeof output.lesson !== 'string' || output.lesson.length > 1000)) {
-    return { ok: false, error: 'lesson must be a string (max 1000 chars)' };
+  if (typeof output.summary !== 'string' || !output.summary.trim() || output.summary.length > 500) {
+    return { ok: false, error: 'summary must be a non-empty string (max 500 chars)' };
   }
-  const out = {
-    summary: output.summary.trim(),
-    lesson: typeof output.lesson === 'string' ? output.lesson.trim() : '',
-    storeSemanticMemory: output.storeSemanticMemory === true,
-    semanticMemory: null,
-    storeEpisodicMemory: output.storeEpisodicMemory === true,
-    episodicMemory: null,
-    changeGoal: output.changeGoal === true,
-    suggestedGoal: null,
-    suggestedGoalReason: '',
-    reviseSkill: null,
+  if (output.lesson !== undefined && (typeof output.lesson !== 'string' || output.lesson.length > 500)) {
+    return { ok: false, error: 'lesson must be a string (max 500 chars)' };
+  }
+  let memory = null;
+  if (output.memory !== undefined && output.memory !== null) {
+    const m = output.memory;
+    if (!m || typeof m !== 'object' || Array.isArray(m)) {
+      return { ok: false, error: 'memory must be an object or null' };
+    }
+    // Null-intent tolerance: the prompt says to send null when nothing is
+    // worth storing; models often send a present-but-textless object
+    // instead. Treat all-empty text as null rather than failing the whole
+    // reflection (observed live: empty episodic summaries). Wrong kinds,
+    // forbidden fields and oversize text still reject.
+    if (m.kind === 'semantic' || m.kind === 'episodic') {
+      const texts = [m.subject, m.content, m.summary, m.lesson].filter((v) => typeof v === 'string');
+      if (texts.length > 0 && texts.every((v) => !v.trim())) {
+        return {
+          ok: true,
+          value: {
+            summary: output.summary.trim(),
+            lesson: typeof output.lesson === 'string' ? output.lesson.trim() : '',
+            memory: null,
+          },
+        };
+      }
+    }
+    const badInner = containsForbidden(m);
+    if (badInner) return { ok: false, error: `Forbidden field in memory: "${badInner}"` };
+    if (m.kind !== 'semantic' && m.kind !== 'episodic') {
+      return { ok: false, error: 'memory.kind must be semantic|episodic' };
+    }
+    if (m.kind === 'semantic') {
+      if (typeof m.subject !== 'string' || !m.subject.trim() || m.subject.length > 120) {
+        return { ok: false, error: 'memory.subject must be non-empty (max 120 chars)' };
+      }
+      if (typeof m.content !== 'string' || !m.content.trim() || m.content.length > 500) {
+        return { ok: false, error: 'memory.content must be non-empty (max 500 chars)' };
+      }
+      let conf = m.confidence === undefined ? 0.6 : Number(m.confidence);
+      if (!Number.isFinite(conf)) return { ok: false, error: 'memory.confidence must be a number 0..1' };
+      conf = Math.max(0, Math.min(1, conf));
+      memory = { kind: 'semantic', subject: m.subject.trim(), content: m.content.trim(), confidence: conf };
+    } else {
+      if (typeof m.summary !== 'string' || !m.summary.trim() || m.summary.length > 500) {
+        return { ok: false, error: 'memory.summary must be non-empty (max 500 chars)' };
+      }
+      if (m.lesson !== undefined && (typeof m.lesson !== 'string' || m.lesson.length > 500)) {
+        return { ok: false, error: 'memory.lesson must be a string (max 500 chars)' };
+      }
+      memory = { kind: 'episodic', summary: m.summary.trim(), lesson: typeof m.lesson === 'string' ? m.lesson.trim() : '' };
+    }
+  }
+  return {
+    ok: true,
+    value: {
+      summary: output.summary.trim(),
+      lesson: typeof output.lesson === 'string' ? output.lesson.trim() : '',
+      memory,
+    },
   };
-  if (out.storeSemanticMemory) {
-    const m = output.semanticMemory;
-    if (!m || typeof m !== 'object') return { ok: false, error: 'semanticMemory must be an object when storeSemanticMemory is true' };
-    const badInner = containsForbidden(m);
-    if (badInner) return { ok: false, error: `Forbidden field in semanticMemory: "${badInner}"` };
-    if (typeof m.subject !== 'string' || !m.subject.trim() || m.subject.length > 120) {
-      return { ok: false, error: 'semanticMemory.subject must be non-empty (max 120 chars)' };
-    }
-    if (typeof m.content !== 'string' || !m.content.trim() || m.content.length > 500) {
-      return { ok: false, error: 'semanticMemory.content must be non-empty (max 500 chars)' };
-    }
-    let conf = m.confidence === undefined ? 0.6 : Number(m.confidence);
-    if (!Number.isFinite(conf)) return { ok: false, error: 'semanticMemory.confidence must be a number 0..1' };
-    conf = Math.max(0, Math.min(1, conf));
-    out.semanticMemory = { subject: m.subject.trim(), content: m.content.trim(), confidence: conf };
-  }
-  if (out.storeEpisodicMemory) {
-    const m = output.episodicMemory;
-    if (!m || typeof m !== 'object') return { ok: false, error: 'episodicMemory must be an object when storeEpisodicMemory is true' };
-    const badInner = containsForbidden(m);
-    if (badInner) return { ok: false, error: `Forbidden field in episodicMemory: "${badInner}"` };
-    if (typeof m.summary !== 'string' || !m.summary.trim() || m.summary.length > 500) {
-      return { ok: false, error: 'episodicMemory.summary must be non-empty (max 500 chars)' };
-    }
-    if (m.lesson !== undefined && (typeof m.lesson !== 'string' || m.lesson.length > 500)) {
-      return { ok: false, error: 'episodicMemory.lesson must be a string (max 500 chars)' };
-    }
-    out.episodicMemory = { summary: m.summary.trim(), lesson: typeof m.lesson === 'string' ? m.lesson.trim() : '' };
-  }
-  if (out.changeGoal) {
-    if (typeof output.suggestedGoal !== 'string' || !output.suggestedGoal.trim() || output.suggestedGoal.length > 300) {
-      return { ok: false, error: 'suggestedGoal must be non-empty (max 300 chars) when changeGoal is true' };
-    }
-    out.suggestedGoal = output.suggestedGoal.trim();
-    out.suggestedGoalReason = String(output.suggestedGoalReason || '').slice(0, 300);
-  }
-  if (output.reviseSkill !== undefined && output.reviseSkill !== null) {
-    const r = output.reviseSkill;
-    if (!r || typeof r !== 'object' || Array.isArray(r)) {
-      return { ok: false, error: 'reviseSkill must be a skill object or null' };
-    }
-    const badInner = containsForbidden(r);
-    if (badInner) return { ok: false, error: `Forbidden field in reviseSkill: "${badInner}"` };
-    // Full skill validation happens in the loop via skillValidator; do a
-    // structural pre-check here.
-    if (typeof r.id !== 'string' || !Array.isArray(r.steps)) {
-      return { ok: false, error: 'reviseSkill must have id and steps' };
-    }
-    out.reviseSkill = r;
-  }
-  return { ok: true, value: out };
 }
 
 function parseReflectionResponse(text) {
@@ -142,4 +152,4 @@ function shouldReflect(event = {}) {
   return false;
 }
 
-module.exports = { buildReflectionPrompt, validateReflection, parseReflectionResponse, shouldReflect };
+module.exports = { buildReflectionPrompt, validateReflection, parseReflectionResponse, shouldReflect, REFLECTION_CONTRACT };
