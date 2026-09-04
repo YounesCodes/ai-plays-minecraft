@@ -14,6 +14,16 @@ function stopBotMotion(bot) {
   } catch {
     // ignore
   }
+  // Consume pathfinder's internal stop flag immediately. bot.pathfinder.stop()
+  // only raises the flag; it is cleared on the NEXT setGoal — which would
+  // otherwise abort that fresh goto instantly with PathStopped (observed
+  // live: every goto following a timeout failed at once). A null goal clears
+  // the flag with no listeners attached, so nothing else can misfire.
+  try {
+    if (bot.pathfinder && typeof bot.pathfinder.setGoal === 'function') bot.pathfinder.setGoal(null);
+  } catch {
+    // ignore
+  }
 }
 
 function abortInfo(ctx) {

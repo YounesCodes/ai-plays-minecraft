@@ -28,7 +28,7 @@ function countTotalInventory(bot) {
   return total;
 }
 
-const { raceWithAbort } = require('./movement');
+const { raceWithAbort, stopBotMotion } = require('./movement');
 const { matchBlockName } = require('../blocks');
 
 function sleep(ms) {
@@ -161,7 +161,6 @@ async function walkToDrop(bot, dropPos) {
     const GoalNear = getGoalNear();
     if (!GoalNear) return false;
     const goal = new GoalNear(Math.floor(dropPos.x), Math.floor(dropPos.y), Math.floor(dropPos.z), 2);
-    let timer = null;
     try {
       const arrived = await Promise.race([
         bot.pathfinder.goto(goal).then(() => true),
@@ -171,12 +170,7 @@ async function walkToDrop(bot, dropPos) {
     } catch {
       return false;
     } finally {
-      if (timer) clearTimeout(timer);
-      try {
-        if (bot.pathfinder && typeof bot.pathfinder.stop === 'function') bot.pathfinder.stop();
-      } catch {
-        // ignore
-      }
+      stopBotMotion(bot);
     }
   } catch {
     return false;

@@ -201,3 +201,36 @@ test('executePrimitive find_block works with mock blocks', async () => {
   assert.strictEqual(res.blockType, 'oak_log');
   assert.deepStrictEqual(res.position, { x: 5, y: 64, z: 0 });
 });
+
+test('timeout consumes the pathfinder stop flag via null goal', async () => {
+  // Regression: bot.pathfinder.stop() only raises an internal flag that the
+  // NEXT setGoal consumes by aborting that fresh goto (PathStopped). Stopping
+  // must therefore be followed by setGoal(null) with no listeners attached.
+  const calls = [];
+  const bot = {
+    pathfinder: {
+      goto: () => new Promise(() => {}),
+      stop: () => {
+        calls.push('stop');
+      },
+      setGoal: (goal) => {
+        calls.push(['setGoal', goal]);
+      },
+    },
+    clearControlStates: () => {
+      calls.push('clear');
+    },
+  };
+  const res = await executePrimitive(
+    bot,
+    { primitive: 'move_near', args: { x: 1, y: 64, z: 2 } },
+    { timeoutMs: 1000 }
+  );
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.timedOut, true);
+  assert.ok(calls.includes('stop'), 'stop called');
+  assert.ok(
+    calls.some((c) => Array.isArray(c) && c[0] === 'setGoal' && c[1] === null),
+    'null goal clears the flag'
+  );
+});
