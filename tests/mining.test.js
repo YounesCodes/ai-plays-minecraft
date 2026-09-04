@@ -126,3 +126,40 @@ test('mineBlockType continues past uncollected blocks with per-block detail', as
   assert.strictEqual(res.blocks.length, 2);
   assert.ok(res.blocks.every((b) => b.blockBroken));
 });
+
+test('mineBlock walks to uncollected log drops and collects them', async () => {
+  const inv = [];
+  const bot = baseBot({
+    inventory: { items: () => inv.slice() },
+    entities: {},
+    blockAt: () => ({ name: 'oak_log', position: { x: 1, y: 2, z: 3 } }),
+    pathfinder: {
+      goto: async () => {
+        inv.push({ name: 'oak_log', count: 1 });
+      },
+      stop: () => {},
+    },
+    dig: async () => {
+      bot.entities[5] = { position: { x: 4, y: 2, z: 3 } };
+    },
+  });
+
+  const res = await mineBlock(bot, { x: 1, y: 2, z: 3 }, {});
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.blockBroken, true);
+  assert.strictEqual(res.dropCollected, true);
+});
+
+test('mineBlockType fails honestly when nothing is collected', async () => {
+  const bot = baseBot({
+    inventory: { items: () => [] },
+    entities: {},
+    findBlock: () => ({ name: 'oak_log', position: { x: 1, y: 2, z: 3 } }),
+    dig: async () => {},
+  });
+
+  const res = await mineBlockType(bot, { blockType: 'oak_log', count: 2 }, {});
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.broken, 2);
+  assert.match(res.error, /collected nothing/);
+});

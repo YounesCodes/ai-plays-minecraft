@@ -16,6 +16,18 @@ function countItem(bot, itemName) {
   return total;
 }
 
+function countTotalInventory(bot) {
+  let total = 0;
+  try {
+    for (const item of bot.inventory.items()) {
+      if (item && Number.isFinite(item.count)) total += item.count;
+    }
+  } catch {
+    // inventory not ready
+  }
+  return total;
+}
+
 const { raceWithAbort } = require('./movement');
 const { matchBlockName } = require('../blocks');
 
@@ -188,6 +200,7 @@ async function breakOne(bot, block, ctx = {}) {
   const beforeIds = snapshotEntityIds(bot);
   const watch = watchDrops(bot, pos, 5);
   const startDrop = expectedDrop ? countItem(bot, expectedDrop) : null;
+  const totalBefore = countTotalInventory(bot);
   try {
     if (typeof bot.dig === 'function') {
       await bot.dig(block);
@@ -205,16 +218,23 @@ async function breakOne(bot, block, ctx = {}) {
   await sleep(900);
   let drops = collectDrops(bot, watch, beforeIds, pos);
   let endDrop = expectedDrop && startDrop !== null ? countItem(bot, expectedDrop) : null;
-  // Deliberate collection: walk to a sitting drop instead of hoping.
-  if (expectedDrop && endDrop !== null && !(endDrop > startDrop) && drops.length > 0 && !abortedCheck(ctx)) {
-    const dp = drops[0] && drops[0].position ? drops[0].position : pos;
-    await walkToDrop(bot, dp);
-    await sleep(900);
-    drops = collectDrops(bot, watch, beforeIds, pos);
-    endDrop = countItem(bot, expectedDrop);
+  // Deliberate collection: walk to a sitting drop instead of hoping. This
+  // applies to mapped expected drops AND plain blocks like logs, which
+  // otherwise get broken at reach edge and left on the ground (observed
+  // live: 5 oak broken, 0 collected).
+  const totalGrew = () => countTotalInventory(bot) > totalBefore;
+  if (drops.length > 0 && !abortedCheck(ctx)) {
+    const alreadyHaveIt = expectedDrop && endDrop !== null ? endDrop > startDrop : totalGrew();
+    if (!alreadyHaveIt) {
+      const dp = drops[0] && drops[0].position ? drops[0].position : pos;
+      await walkToDrop(bot, dp);
+      await sleep(900);
+      drops = collectDrops(bot, watch, beforeIds, pos);
+      if (expectedDrop && endDrop !== null) endDrop = countItem(bot, expectedDrop);
+    }
   }
   watch.stop();
-  const dropCollected = expectedDrop && endDrop !== null ? endDrop > startDrop : null;
+  const dropCollected = expectedDrop && endDrop !== null ? endDrop > startDrop : totalGrew();
   const dropSpawned = drops.length > 0 || !!dropCollected;
   let toolWasSuitable = null;
   if (expectedDrop) {
@@ -244,7 +264,7 @@ async function mineBlock(bot, args, ctx = {}) {
       if (!out.blockBroken) {
         return { ok: false, primitive: 'mine_block', block: blockType, tool: out.tool, error: out.error, ...(out.aborted ? { aborted: true } : {}) };
       }
-      const ok = out.expectedDrop ? !!out.dropCollected : true;
+      const ok = !!out.dropCollected;
       const result = {
         ok,
         primitive: 'mine_block',
@@ -259,8 +279,10 @@ async function mineBlock(bot, args, ctx = {}) {
       };
       if (!ok) {
         result.error = out.dropSpawned
-          ? `Broke ${blockType} but did not collect ${out.expectedDrop}; drop is on the ground nearby`
-          : `Broke ${blockType} but no ${out.expectedDrop} drop appeared; tool may be unsuitable`;
+          ? `Broke ${blockType} but collected nothing; drops are on the ground nearby`
+          : (out.expectedDrop
+            ? `Broke ${blockType} but no ${out.expectedDrop} drop appeared; tool may be unsuitable`
+            : `Broke ${blockType} but collected nothing`);
       }
       return result;
     } catch (err) {
@@ -329,6 +351,13 @@ async function mineBlockType(bot, args, ctx = {}) {
     }
     const endCount = expectedDrop ? countItem(bot, expectedDrop) : countItem(bot, blockType);
     const dropObtained = endCount > startCount;
+    if (!dropObtained) {
+      return {
+        ok: false, primitive: 'mine_block_type', block: blockType, tool,
+        broken, uncollected, blocks, dropObtained, expectedDropObserved: expectedDrop ? false : null,
+        error: `Broke ${broken} ${blockType} but collected nothing; drops are on the ground nearby`,
+      };
+    }
     return {
       ok: true, primitive: 'mine_block_type', block: blockType, tool,
       broken, uncollected, blocks, dropObtained, expectedDropObserved: expectedDrop ? dropObtained : null,
