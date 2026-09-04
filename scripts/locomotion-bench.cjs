@@ -146,6 +146,8 @@ async function main() {
     bot.pathfinder.setMovements(movements);
   });
   // Movements for the first spawn (spawn event may have fired before handler).
+  // Same for the physics compatibility bump: bot.physics only exists
+  // post-login, so apply it here where the bot is guaranteed spawned.
   try {
     const { Movements } = pathfinderPlugin;
     const movements = new Movements(bot);
@@ -154,6 +156,7 @@ async function main() {
     movements.allowSprinting = true;
     movements.allowParkour = false;
     bot.pathfinder.setMovements(movements);
+    applyPathfinderCompat(bot, VERSION);
   } catch {
     // ignore; spawn handler covers it
   }
