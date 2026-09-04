@@ -2,8 +2,6 @@
 
 ## First-time deployment (new VM)
 
-## First-time deployment (new VM)
-
 This section is the self-contained short path from empty VM to running agent:
 
 1. Provision an Ubuntu 24.04 VM (4 vCPU, 8 GB RAM, 40–60 GB disk) on your LAN.
