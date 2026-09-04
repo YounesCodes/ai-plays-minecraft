@@ -65,6 +65,7 @@ function buildSystemPromptAutonomous(directive, skills = []) {
     '- nextStep is REQUIRED and follows the same step shape.',
     '- proposeSkill: null, or a COMPLETE skill {"id":"...","name":"...","description":"...","parameters":[],"steps":[{"primitive":"...","args":{...}}]} where id is non-empty (max 80 chars), description non-empty (max 500), parameters is an array (max 8), steps is 1-12 entries each naming a trusted primitive. NEVER send a partial or placeholder skill — when in doubt, use null. A bad proposal fails the entire plan.',
     'Mining results distinguish blockBroken (dig worked), dropSpawned (an item entity appeared), dropCollected (expected item reached inventory), and toolWasSuitable (false ONLY when a break produced no drop at all — never blame the tool for a drop merely sitting uncollected on the ground).',
+    'When exploration.localSearchExhausted is true, strongly consider the explore primitive to relocate before retrying local resource actions — the nearby targets are proven unreachable, not merely unlucky.',
     'Current observation overrides older memories for where things ARE right now (blocks, mobs, positions); memories inform what things mean and what worked before. Never mine coordinates the current scan does not show.',
     'Plans are intentions, not scripts: normally only nextStep executes, then we re-observe.',
   ].join('\n');

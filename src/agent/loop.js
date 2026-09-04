@@ -551,11 +551,26 @@ async function runAutonomousLoop(bot, options = {}) {
         metrics.inc('actionErrors');
       }
       // Local-search exhaustion signal for exploration decisions: consecutive
-      // resource failures (nothing seen / nothing reachable), reset on success.
-      if (result && !result.ok && (result.reason === 'no_reachable_target' || result.reason === 'resource_not_seen' || /No .* found within|No .* within/.test(result.error || ''))) {
-        resourceFailStreak += 1;
-      } else if (result && result.ok) {
-        resourceFailStreak = 0;
+      // RESOURCE failures with no progress. Movement and other successes must
+      // NOT reset it (a successful walk is not resource progress); only a
+      // resource step that actually yields something clears the streak.
+      const pname = (result && (result.primitive || result.action)) || null;
+      const isResourceStep =
+        pname === 'mine_block' ||
+        pname === 'mine_block_type' ||
+        pname === 'find_block' ||
+        pname === 'collect_logs';
+      if (isResourceStep) {
+        let progressed = false;
+        if (result && result.ok) {
+          if (typeof result.collected === 'number') progressed = result.collected > 0;
+          else if (typeof result.dropCollected === 'boolean') progressed = result.dropCollected;
+          else if (pname === 'find_block') progressed = true;
+          else if (typeof result.broken === 'number') progressed = result.broken > 0 && result.dropObtained !== false;
+          else progressed = true;
+        }
+        if (progressed) resourceFailStreak = 0;
+        else resourceFailStreak += 1;
       }
       lastResult = result;
 
