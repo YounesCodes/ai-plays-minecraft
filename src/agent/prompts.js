@@ -64,6 +64,7 @@ function buildSystemPromptAutonomous(directive, skills = []) {
     '- plan: array of AT MOST 12 steps; each step {"type":"primitive"|"skill","name":"...","args":{...}} using real primitive names with valid args.',
     '- nextStep is REQUIRED and follows the same step shape.',
     '- proposeSkill: null, or a COMPLETE skill {"id":"...","name":"...","description":"...","parameters":[],"steps":[{"primitive":"...","args":{...}}]} where id is non-empty (max 80 chars), description non-empty (max 500), parameters is an array (max 8), steps is 1-12 entries each naming a trusted primitive. NEVER send a partial or placeholder skill — when in doubt, use null. A bad proposal fails the entire plan.',
+    'Mining results distinguish blockBroken (dig worked), dropSpawned (an item entity appeared), dropCollected (expected item reached inventory), and toolWasSuitable (false ONLY when a break produced no drop at all — never blame the tool for a drop merely sitting uncollected on the ground).',
     'Plans are intentions, not scripts: normally only nextStep executes, then we re-observe.',
   ].join('\n');
 }

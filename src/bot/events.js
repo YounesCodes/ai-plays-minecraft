@@ -1,7 +1,6 @@
 'use strict';
 
 const { logger } = require('../telemetry/logger');
-const metrics = require('../telemetry/metrics');
 
 // Install useful, low-noise event handlers. Does not restart the process;
 // in-game respawn is handled by the server/bot itself, and the agent loop
@@ -28,14 +27,10 @@ function installEvents(bot) {
   });
 
   bot.on('death', () => {
-    metrics.inc('deaths');
-    logger.warn(`Died (total deaths: ${metrics.get('deaths')})`);
-    try {
-      const decisions = require('../telemetry/decisions');
-      decisions.record('death', { position: bot.entity?.position || null });
-    } catch {
-      // telemetry must never crash events
-    }
+    // Death counting + memory live in the agent loop (single authoritative
+    // path with step/position context); here we only log so the overlay
+    // metric is never double-counted.
+    logger.warn('Bot died; agent loop handles respawn and records it (no duplicate loop).');
   });
 
   bot.on('kicked', (reason) => {

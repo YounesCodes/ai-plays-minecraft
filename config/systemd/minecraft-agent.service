@@ -10,7 +10,10 @@ User=YOUR_LINUX_USER
 WorkingDirectory=/home/YOUR_LINUX_USER/minecraft-lab/ai-plays-minecraft
 EnvironmentFile=/home/YOUR_LINUX_USER/minecraft-lab/ai-plays-minecraft/.env
 ExecStart=/usr/bin/node /home/YOUR_LINUX_USER/minecraft-lab/ai-plays-minecraft/src/index.js
-Restart=on-failure
+# Always (not just on-failure): the agent exits nonzero on loop crash or
+# lost Minecraft connection, and a clean idle-but-alive process would defeat
+# on-failure supervision. Restarts are cheap (memory persists in data/).
+Restart=always
 RestartSec=10
 TimeoutStopSec=30
 

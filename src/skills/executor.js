@@ -91,7 +91,7 @@ async function executeSkill(bot, skill, args = {}, options = {}) {
     }
     let result;
     try {
-      result = await executePrimitive(bot, { primitive: step.primitive, args: sub.value }, { timeoutMs: stepTimeout });
+      result = await executePrimitive(bot, { primitive: step.primitive, args: sub.value }, { timeoutMs: stepTimeout, shouldAbort: options.shouldAbort });
     } catch (err) {
       result = { ok: false, primitive: step.primitive, error: err?.message || 'Primitive crashed' };
     }
@@ -108,7 +108,7 @@ async function executeSkill(bot, skill, args = {}, options = {}) {
 function summarizeResult(result) {
   if (!result || typeof result !== 'object') return null;
   const out = { ok: !!result.ok, primitive: result.primitive || null };
-  for (const k of ['error', 'block', 'tool', 'dropObtained', 'weapon', 'food', 'position', 'timedOut']) {
+  for (const k of ['error', 'block', 'tool', 'dropObtained', 'blockBroken', 'expectedDrop', 'dropSpawned', 'dropCollected', 'toolWasSuitable', 'broken', 'uncollected', 'weapon', 'food', 'position', 'timedOut', 'aborted']) {
     if (result[k] !== undefined) out[k] = result[k];
   }
   return out;

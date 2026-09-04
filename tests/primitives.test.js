@@ -82,3 +82,107 @@ test('executePrimitive find_entity works with mock entities', async () => {
   assert.strictEqual(res.ok, true);
   assert.ok(res.entities.some((e) => e.type === 'creeper'));
 });
+
+test('move_near aborts on interrupt instead of running out the timeout', async () => {
+  let stopped = 0;
+  const bot = {
+    pathfinder: {
+      goto: () => new Promise(() => {}), // hangs: without abort this takes the full timeout
+      stop: () => {
+        stopped += 1;
+      },
+    },
+    clearControlStates: () => {
+      stopped += 1;
+    },
+  };
+  const t0 = Date.now();
+  const res = await executePrimitive(
+    bot,
+    { primitive: 'move_near', args: { x: 100, y: 64, z: 100 } },
+    { timeoutMs: 5000, shouldAbort: () => ({ type: 'immediate_threat', reason: 'creeper' }) }
+  );
+  const ms = Date.now() - t0;
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.aborted, true);
+  assert.match(res.error, /creeper/);
+  assert.ok(stopped > 0, 'abort stops the bot');
+  assert.ok(ms < 4000, `aborted in ${ms}ms, well before the timeout`);
+});
+
+test('move_near timeout stops the bot (no zombie goto)', async () => {
+  let stopped = 0;
+  const bot = {
+    pathfinder: {
+      goto: () => new Promise(() => {}),
+      stop: () => {
+        stopped += 1;
+      },
+    },
+    clearControlStates: () => {
+      stopped += 1;
+    },
+  };
+  const res = await executePrimitive(
+    bot,
+    { primitive: 'move_near', args: { x: 1, y: 64, z: 2 } },
+    { timeoutMs: 1000 }
+  );
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.timedOut, true);
+  assert.ok(stopped > 0, 'timeout stops the bot');
+});
+
+test('attack_entity aborts mid-loop on interrupt', async () => {
+  let swings = 0;
+  let stopped = 0;
+  let polls = 0;
+  const bot = {
+    health: 20,
+    entities: { 37: { id: 37, position: { x: 1, y: 64, z: 1 } } },
+    attack: async () => {
+      swings += 1;
+    },
+    pathfinder: {
+      stop: () => {
+        stopped += 1;
+      },
+    },
+    clearControlStates: () => {
+      stopped += 1;
+    },
+  };
+  const res = await executePrimitive(
+    bot,
+    { primitive: 'attack_entity', args: { entityId: 37 } },
+    {
+      timeoutMs: 10000,
+      maxAttackSeconds: 20,
+      shouldAbort: () => {
+        polls += 1;
+        return polls >= 2 ? { type: 'immediate_threat', reason: 'creeper' } : null;
+      },
+    }
+  );
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.aborted, true);
+  assert.ok(swings >= 1, 'swung before the abort arrived');
+  assert.ok(stopped > 0, 'abort stops the bot');
+});
+
+test('stop_attacking actually stops movement', async () => {
+  let stopped = 0;
+  const bot = {
+    pathfinder: {
+      stop: () => {
+        stopped += 1;
+      },
+    },
+    clearControlStates: () => {
+      stopped += 1;
+    },
+  };
+  const res = await executePrimitive(bot, { primitive: 'stop_attacking', args: {} });
+  assert.strictEqual(res.ok, true);
+  assert.ok(stopped > 0, 'stop_attacking halts the bot');
+});

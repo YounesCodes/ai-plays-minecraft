@@ -2,9 +2,9 @@
 
 ## First-time deployment (new VM)
 
-> Extended runbooks (`docs/vm-setup.md`, architecture notes) are local-only
-> and git-ignored — they live next to the deployment, not on GitHub. This
-> section is the self-contained short path.
+## First-time deployment (new VM)
+
+This section is the self-contained short path from empty VM to running agent:
 
 1. Provision an Ubuntu 24.04 VM (4 vCPU, 8 GB RAM, 40–60 GB disk) on your LAN.
 2. `sudo apt update && sudo apt upgrade -y`, then install base tools:

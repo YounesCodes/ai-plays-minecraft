@@ -108,6 +108,7 @@ async function runBenchmarkLoop(bot, options = {}) {
 
     let lastResult = null;
     let steps = 0;
+    let wasDead = false; // count/record each death once, not every tick while dead
 
     for (let step = 1; step <= bounded; step++) {
       steps = step;
@@ -129,11 +130,17 @@ async function runBenchmarkLoop(bot, options = {}) {
       }
 
       if (state.health <= 0) {
-        logger.warn(`Step ${step}: bot is dead; waiting for respawn.`);
+        if (!wasDead) {
+          wasDead = true;
+          logger.warn(`Step ${step}: bot is dead; waiting for respawn.`);
+          metrics.inc('deaths');
+          decisions.record('death', { step, mode: 'benchmark', position: state.position || null });
+        }
         lastResult = { ok: false, error: 'Bot is dead' };
         await sleep(delayMs);
         continue;
       }
+      wasDead = false; // survived this tick: re-arm death counting
 
       let rawAction;
       try {
@@ -228,6 +235,7 @@ async function runAutonomousLoop(bot, options = {}) {
     let consecutivePlannerFailures = 0;
     let wasDead = false;
     let abortRequested = null;
+    let calmStreak = 0; // consecutive ticks with no interrupt (drives goal resume)
     let step = 0;
     const seenValuables = new Set();
     const milestoneItems = new Set();
@@ -342,6 +350,25 @@ async function runAutonomousLoop(bot, options = {}) {
         }
         pushEvent({ type: `interrupt:${topInterrupt.type}`, step, detail: topInterrupt.reason || '' });
       }
+      // No active interrupt: an emergency goal that outlived its threat can
+      // resume the suspended goal it preempted. Hysteresis (3 calm ticks)
+      // avoids suspend/resume flapping when a threat flickers at the edge.
+      if (!topInterrupt) {
+        calmStreak += 1;
+        const gs = goalManager.getState();
+        if (calmStreak >= 3 && gs.currentGoal && gs.currentGoal.emergency && gs.suspendedGoal) {
+          const from = gs.currentGoal.description;
+          const resumed = goalManager.completeGoal('threat cleared; resuming previous goal');
+          if (resumed && resumed.ok) {
+            calmStreak = 0;
+            metrics.inc('goalChanges');
+            decisions.record('goal_changed', { from, to: resumed.current ? resumed.current.description : null, reason: 'threat cleared', step });
+            logger.info(`Resumed suspended goal: ${resumed.current ? resumed.current.description : '(none)'}`);
+          }
+        }
+      } else {
+        calmStreak = 0;
+      }
 
       // 3. Memory retrieval (bounded, deterministic).
       const stores = loadStores();
@@ -398,6 +425,12 @@ async function runAutonomousLoop(bot, options = {}) {
           ticksSincePlan = 0;
           applyPlannerSideEffects({ validated, goalManager, step, perception });
           activePlan = Array.isArray(validated.plan) ? [...validated.plan] : [];
+          // The prompt example shows nextStep duplicated as plan[0]; executing
+          // nextStep now and shifting plan[0] later would run it twice.
+          if (activePlan.length > 0 && sameStep(activePlan[0], freshPlan.nextStep)) {
+            activePlan.shift();
+            logger.debug('Dropped plan[0] duplicate of nextStep.');
+          }
           decisions.record('plan', {
             step,
             assessment: validated.assessment?.summary?.slice(0, 300),
@@ -524,6 +557,17 @@ async function runAutonomousLoop(bot, options = {}) {
   }
 }
 
+function sameStep(a, b) {
+  // Deep-equality for plan steps (type + name + args) used to drop a
+  // plan[0] that merely repeats the just-executed nextStep.
+  try {
+    if (!a || !b || a.type !== b.type || a.name !== b.name) return false;
+    return JSON.stringify(a.args || {}) === JSON.stringify(b.args || {});
+  } catch {
+    return false;
+  }
+}
+
 function emergencyGoalFor(interrupt) {
   switch (interrupt?.type) {
     case 'immediate_threat':
@@ -552,21 +596,21 @@ function rankRelevantSkills(skills, relevant) {
 }
 
 function applyPlannerSideEffects({ validated, goalManager, step, perception }) {
-  // Goal update.
+  // Goal update: only an explicit changeGoal replaces the current goal.
+  // (Previously any description drift replaced it, which thrashed goals.)
   const current = goalManager.getState().currentGoal;
-  if (validated.goal?.changeGoal || !current || current.description !== validated.goal.description) {
-    if (!current || validated.goal.changeGoal || current.description !== validated.goal.description) {
-      const prev = current?.description || null;
-      if (validated.goal.changeGoal || !current || prev !== validated.goal.description) {
-        goalManager.setGoal(validated.goal.description, {
-          priority: validated.goal.priority,
-          reason: validated.goal.reason,
-          subgoals: [],
-        });
-        metrics.inc('goalChanges');
-        decisions.record('goal_changed', { from: prev, to: validated.goal.description, reason: validated.goal.reason, step });
-      }
-    }
+  const incoming = validated.goal || {};
+  if (!current || incoming.changeGoal === true) {
+    const prev = current?.description || null;
+    goalManager.setGoal(incoming.description, {
+      priority: incoming.priority,
+      reason: incoming.reason,
+      subgoals: [],
+    });
+    metrics.inc('goalChanges');
+    decisions.record('goal_changed', { from: prev, to: incoming.description, reason: incoming.reason, step });
+  } else {
+    logger.debug('Keeping current goal; planner did not set changeGoal.');
   }
   // Proposed skill.
   if (validated.proposeSkill && skillGenEnabled()) {

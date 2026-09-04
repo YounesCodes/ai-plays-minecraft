@@ -70,6 +70,7 @@ function createGoalManager(options = {}) {
       reason: String(opts.reason || 'Interrupt preempted previous goal').slice(0, 300),
       createdAt: nowIso(),
       status: 'active',
+      emergency: true, // set by interrupt preemption; cleared when resumed via completeGoal()
     };
     return { ok: true, goal: { ...currentGoal }, suspended: { ...suspendedGoal } };
   }

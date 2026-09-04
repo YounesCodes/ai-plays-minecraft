@@ -3,12 +3,57 @@
 // Movement primitives. All bounded, all return structured results, never throw
 // for ordinary Minecraft failures (no path, no target).
 
-function withTimeout(promise, ms, primitive) {
+function stopBotMotion(bot) {
+  try {
+    if (bot.pathfinder && typeof bot.pathfinder.stop === 'function') bot.pathfinder.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    if (typeof bot.clearControlStates === 'function') bot.clearControlStates();
+  } catch {
+    // ignore
+  }
+}
+
+function abortInfo(ctx) {
+  try {
+    const i = ctx && typeof ctx.shouldAbort === 'function' ? ctx.shouldAbort() : null;
+    if (i) return `${i.type || 'abort'}${i.reason ? `: ${i.reason}` : ''}`;
+  } catch {
+    // a broken hook must never break the primitive
+  }
+  return null;
+}
+
+// Race work against a timeout AND cooperative abort. Whoever wins the race
+// stops the bot first, so a timed-out or aborted goto can never keep
+// dueling later steps over pathfinder goals (the zombie-goto class).
+function raceWithAbort(bot, promise, { timeoutMs, primitive, ctx = {}, extra = {} }) {
+  if (promise && typeof promise.catch === 'function') promise.catch(() => {});
   let timer = null;
+  let poller = null;
+  const cleanup = () => {
+    if (timer) clearTimeout(timer);
+    if (poller) clearInterval(poller);
+  };
   const timeout = new Promise((resolve) => {
-    timer = setTimeout(() => resolve({ ok: false, primitive, error: `Timed out after ${ms}ms`, timedOut: true }), ms);
+    timer = setTimeout(() => {
+      stopBotMotion(bot);
+      resolve({ ok: false, primitive, timedOut: true, error: `Timed out after ${timeoutMs}ms`, ...extra });
+    }, timeoutMs);
   });
-  return Promise.race([promise, timeout]).finally(() => { if (timer) clearTimeout(timer); });
+  const abort = new Promise((resolve) => {
+    if (!ctx || typeof ctx.shouldAbort !== 'function') return; // pends forever, GC-able, race ignores it
+    poller = setInterval(() => {
+      const detail = abortInfo(ctx);
+      if (detail !== null) {
+        stopBotMotion(bot);
+        resolve({ ok: false, primitive, aborted: true, error: `Aborted (${detail})`, ...extra });
+      }
+    }, 200);
+  });
+  return Promise.race([promise, timeout, abort]).finally(cleanup);
 }
 
 function currentPos(bot) {
@@ -42,7 +87,7 @@ async function moveNear(bot, args, ctx = {}) {
       return { ok: false, primitive: 'move_near', error: err?.message || 'No path found' };
     }
   })();
-  return withTimeout(run, timeoutMs, 'move_near');
+  return raceWithAbort(bot, run, { timeoutMs, primitive: 'move_near', ctx });
 }
 
 function findEntityById(bot, entityId) {
@@ -78,7 +123,7 @@ async function moveNearEntity(bot, args, ctx = {}) {
       return { ok: false, primitive: 'move_near_entity', error: err?.message || 'No path found' };
     }
   })();
-  return withTimeout(run, timeoutMs, 'move_near_entity');
+  return raceWithAbort(bot, run, { timeoutMs, primitive: 'move_near_entity', ctx });
 }
 
 async function moveAwayFromEntity(bot, args, ctx = {}) {
@@ -108,17 +153,12 @@ async function moveAwayFromEntity(bot, args, ctx = {}) {
       return { ok: false, primitive: 'move_away_from_entity', error: err?.message || 'No path found' };
     }
   })();
-  return withTimeout(run, timeoutMs, 'move_away_from_entity');
+  return raceWithAbort(bot, run, { timeoutMs, primitive: 'move_away_from_entity', ctx });
 }
 
 async function stopMovement(bot) {
-  try {
-    if (bot.pathfinder && typeof bot.pathfinder.stop === 'function') bot.pathfinder.stop();
-    if (typeof bot.clearControlStates === 'function') bot.clearControlStates();
-    return { ok: true, primitive: 'stop_movement' };
-  } catch (err) {
-    return { ok: false, primitive: 'stop_movement', error: err?.message || 'Stop failed' };
-  }
+  stopBotMotion(bot);
+  return { ok: true, primitive: 'stop_movement' };
 }
 
-module.exports = { moveNear, moveNearEntity, moveAwayFromEntity, stopMovement, findEntityById };
+module.exports = { moveNear, moveNearEntity, moveAwayFromEntity, stopMovement, findEntityById, stopBotMotion, raceWithAbort };

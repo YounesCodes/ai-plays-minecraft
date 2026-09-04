@@ -17,6 +17,7 @@ test('autonomous prompt states every enforced output bound', () => {
     '300', // max goal description chars
     'proposeSkill',
     'nextStep is REQUIRED',
+    'toolWasSuitable',
   ]) {
     assert.ok(prompt.includes(needle), `prompt missing constraint: ${needle}`);
   }

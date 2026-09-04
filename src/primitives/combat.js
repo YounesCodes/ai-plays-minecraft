@@ -4,7 +4,7 @@
 // honest failure reporting so reflection can learn (e.g. wrong tool, escaped
 // target, died mid-fight).
 
-const { findEntityById } = require('./movement');
+const { findEntityById, raceWithAbort, stopBotMotion } = require('./movement');
 
 const MELEE_PRIORITY = [
   'netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'golden_sword', 'wooden_sword',
@@ -90,8 +90,28 @@ async function attackEntity(bot, args, ctx = {}) {
       }
       const deadline = Date.now() + maxSeconds * 1000;
       let swings = 0;
-      // Bounded attack loop: swing until target gone/dead or deadline.
+      // Bounded attack loop: swing until target gone/dead, deadline, or abort.
+      // The abort check is what lets an interrupt (creeper!) preempt combat
+      // instead of the bot finishing its fight first.
       while (Date.now() < deadline) {
+        let abortDetail = null;
+        try {
+          if (ctx && typeof ctx.shouldAbort === 'function') {
+            const interrupt = ctx.shouldAbort();
+            if (interrupt) abortDetail = `${interrupt.type || 'abort'}${interrupt.reason ? `: ${interrupt.reason}` : ''}`;
+          }
+        } catch {
+          abortDetail = null;
+        }
+        if (abortDetail !== null) {
+          stopBotMotion(bot);
+          return {
+            ok: false, primitive: 'attack_entity', entityId: args.entityId,
+            aborted: true, error: `Aborted (${abortDetail})`, swings,
+            durationMs: Date.now() - started,
+            healthChange: startHealth !== null && typeof bot.health === 'number' ? Math.round((bot.health - startHealth) * 10) / 10 : null,
+          };
+        }
         const t = findEntityById(bot, args.entityId);
         if (!t || t.dead || t.health === 0 || t.removed) {
           return {
@@ -129,23 +149,14 @@ async function attackEntity(bot, args, ctx = {}) {
     }
   })();
 
-  let timer = null;
-  const timeout = new Promise((resolve) => {
-    timer = setTimeout(() => resolve({ ok: false, primitive: 'attack_entity', entityId: args.entityId, error: `Timed out after ${timeoutMs}ms`, timedOut: true }), timeoutMs);
-  });
-  try {
-    return await Promise.race([run, timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  return raceWithAbort(bot, run, { timeoutMs, primitive: 'attack_entity', ctx, extra: { entityId: args.entityId } });
 }
 
 async function stopAttacking(bot) {
   try {
     if (bot.pvp && typeof bot.pvp.stop === 'function') bot.pvp.stop();
-    if (bot.pathfinder && typeof bot.pathfinder.stop === 'function') {
-      // Only stop pathfinder movement tied to combat; safe no-op otherwise.
-    }
+    if (bot.pathfinder && typeof bot.pathfinder.stop === 'function') bot.pathfinder.stop();
+    if (typeof bot.clearControlStates === 'function') bot.clearControlStates();
     return { ok: true, primitive: 'stop_attacking' };
   } catch (err) {
     return { ok: false, primitive: 'stop_attacking', error: err?.message || 'Stop failed' };
