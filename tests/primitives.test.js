@@ -186,3 +186,18 @@ test('stop_attacking actually stops movement', async () => {
   assert.strictEqual(res.ok, true);
   assert.ok(stopped > 0, 'stop_attacking halts the bot');
 });
+
+test('executePrimitive find_block works with mock blocks', async () => {
+  const bot = {
+    entity: { position: { x: 0, y: 64, z: 0 } },
+    findBlock: ({ matching }) => {
+      if (typeof matching !== 'function') throw new Error('string matching unsupported');
+      const b = { name: 'oak_log', position: { x: 5, y: 64, z: 0 } };
+      return matching(b) ? b : null;
+    },
+  };
+  const res = await executePrimitive(bot, { primitive: 'find_block', args: { blockType: 'oak_log' } });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.blockType, 'oak_log');
+  assert.deepStrictEqual(res.position, { x: 5, y: 64, z: 0 });
+});

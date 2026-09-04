@@ -72,6 +72,28 @@ test('mineBlock reports uncollected drop without blaming the tool', async () => 
   assert.match(res.error, /ground nearby/);
 });
 
+test('mineBlockType finds blocks by type name (predicate matching)', async () => {
+  // The mock only honors function matchers, like real Mineflayer: passing
+  // the raw name string (the old bug) throws here and finds nothing.
+  const inv = [];
+  const bot = baseBot({
+    inventory: { items: () => inv.slice() },
+    entities: {},
+    findBlock: ({ matching }) => {
+      if (typeof matching !== 'function') throw new Error('string matching unsupported');
+      const b = { name: 'oak_log', position: { x: 1, y: 2, z: 3 } };
+      return matching(b) ? b : null;
+    },
+    dig: async () => {
+      inv.push({ name: 'oak_log', count: 2 });
+    },
+  });
+
+  const res = await mineBlockType(bot, { blockType: 'oak_log', count: 2 }, {});
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.broken, 2);
+  assert.strictEqual(res.dropObtained, true);
+});
 test('mineBlock aborts before digging when an interrupt is pending', async () => {
   let dug = false;
   const bot = baseBot({

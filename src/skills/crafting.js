@@ -1,5 +1,7 @@
 'use strict';
 
+const { matchBlockName } = require('../blocks');
+
 function getMinecraftData(version) {
   try {
     return require('minecraft-data')(version);
@@ -31,7 +33,7 @@ async function craftItem(bot, itemName, count = 1) {
 
   let table = null;
   try {
-    table = bot.findBlock({ matching: 'crafting_table', maxDistance: 6 });
+    table = bot.findBlock({ matching: matchBlockName('crafting_table'), maxDistance: 6 });
   } catch {
     table = null;
   }

@@ -2,6 +2,7 @@
 
 // Generic single-block-type mining abstraction built on collectblock.
 // Intentionally simple: no cave exploration, no tool management yet.
+const { matchBlockName } = require('../blocks');
 function getSearchDistance() {
   const v = parseInt(process.env.MAX_BLOCK_SEARCH_DISTANCE || '64', 10);
   return Number.isFinite(v) && v > 0 ? Math.min(v, 128) : 64;
@@ -36,7 +37,7 @@ async function mineBlockType(bot, blockName, amount = 1) {
   for (let i = 0; i < target; i++) {
     let block = null;
     try {
-      block = bot.findBlock({ matching: blockName, maxDistance });
+      block = bot.findBlock({ matching: matchBlockName(blockName), maxDistance });
     } catch {
       block = null;
     }

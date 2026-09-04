@@ -1,5 +1,7 @@
 'use strict';
 
+const { matchBlockName } = require('../blocks');
+
 // Crafting primitive (trusted): recipe lookup + craft, bounded count.
 
 function getMinecraftData(version) {
@@ -24,7 +26,7 @@ async function craftItem(bot, args) {
   let table = null;
   try {
     if (typeof bot.findBlock === 'function') {
-      table = bot.findBlock({ matching: 'crafting_table', maxDistance: 6 });
+      table = bot.findBlock({ matching: matchBlockName('crafting_table'), maxDistance: 6 });
     }
   } catch {
     table = null;

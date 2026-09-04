@@ -17,6 +17,7 @@ function countItem(bot, itemName) {
 }
 
 const { raceWithAbort } = require('./movement');
+const { matchBlockName } = require('../blocks');
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -292,7 +293,7 @@ async function mineBlockType(bot, args, ctx = {}) {
       }
       let block = null;
       try {
-        block = bot.findBlock({ matching: blockType, maxDistance });
+        block = bot.findBlock({ matching: matchBlockName(blockType), maxDistance });
       } catch {
         block = null;
       }

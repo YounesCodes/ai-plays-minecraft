@@ -3,6 +3,7 @@
 // Read-only perception primitives: bounded search, structured results.
 
 const { HOSTILE_TYPES } = require('../bot/observations');
+const { matchBlockName } = require('../blocks');
 
 function round1(n) {
   return Math.round(Number(n) * 10) / 10;
@@ -23,7 +24,7 @@ async function findBlock(bot, args) {
     if (typeof bot.findBlock !== 'function') {
       return { ok: false, primitive: 'find_block', error: 'Block search unavailable' };
     }
-    const block = bot.findBlock({ matching: args.blockType, maxDistance: radius });
+    const block = bot.findBlock({ matching: matchBlockName(args.blockType), maxDistance: radius });
     if (!block) {
       return { ok: false, primitive: 'find_block', blockType: args.blockType, error: `No ${args.blockType} within ${radius} blocks` };
     }
