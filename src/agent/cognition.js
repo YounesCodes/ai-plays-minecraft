@@ -20,8 +20,13 @@ function validatePlanStep(step, knownSkillNames = new Set()) {
     if (typeof step.name !== 'string' || !step.name) {
       return { ok: false, error: 'Skill step needs a name' };
     }
-    if (knownSkillNames.size > 0 && !knownSkillNames.has(step.name)) {
-      return { ok: false, error: `Unknown skill: ${step.name}` };
+    // Always enforced, even when the library is empty: an empty library
+    // means NO skill steps are legal (use primitives). The old size>0
+    // bypass let the planner hallucinate skill names that failed later
+    // at execution, looping on the same unknown skill every turn.
+    if (!knownSkillNames.has(step.name)) {
+      const known = [...knownSkillNames].slice(0, 10).join(', ') || '(none yet — use a primitive step instead)';
+      return { ok: false, error: `Unknown skill: ${step.name}. Known skills: ${known}` };
     }
     if (step.args !== undefined && (typeof step.args !== 'object' || step.args === null || Array.isArray(step.args))) {
       return { ok: false, error: 'Skill args must be an object' };

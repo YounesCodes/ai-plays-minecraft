@@ -103,3 +103,21 @@ test('categorizePlannerError buckets invalid planner output', () => {
   assert.strictEqual(categorizePlannerError(new Error('mine_block: missing required argument "x"')), 'missing-fields');
   assert.strictEqual(categorizePlannerError(new Error('something completely different')), 'other');
 });
+
+test('unknown skill names fail even with an empty library', () => {
+  const { validatePlannerOutput } = require('../src/agent/cognition');
+  const base = {
+    assessment: { summary: 'test' },
+    goal: { description: 'g', priority: 50, reason: 'r', changeGoal: false },
+    plan: [],
+    proposeSkill: null,
+    memoryToCreate: null,
+  };
+  const bad = {
+    ...base,
+    nextStep: { type: 'skill', name: 'explore_for_trees_and_table', args: {} },
+  };
+  const res = validatePlannerOutput(bad, { knownSkillNames: new Set() });
+  assert.strictEqual(res.ok, false);
+  assert.match(res.error, /Unknown skill/);
+});
