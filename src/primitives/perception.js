@@ -4,7 +4,7 @@
 
 const { HOSTILE_TYPES } = require('../bot/observations');
 const { matchBlockName } = require('../blocks');
-const targetFailures = require('../navigation/targetFailures');
+const { getSelectableBlocks } = require('../navigation/blockCandidates');
 
 function round1(n) {
   return Math.round(Number(n) * 10) / 10;
@@ -32,51 +32,45 @@ async function findBlock(bot, args) {
       return { ok: false, primitive: 'find_block', error: 'Block search unavailable' };
     }
     const match = matchBlockName(args.blockType);
-    let candidates = [];
-    try {
-      if (typeof bot.findBlocks === 'function') {
-        const found = bot.findBlocks({ matching: match, maxDistance: radius, count: 12 });
-        if (Array.isArray(found)) candidates = found.filter(Boolean);
-      }
-    } catch {
-      // fall through to singular search
-    }
-    if (candidates.length === 0) {
+    // Shared Vec3->Block pipeline (discover/normalize/exclude/rank) — the
+    // same ordering mine_block_type attempts, so perception and mining
+    // never disagree on the "best" target.
+    const sel = getSelectableBlocks(bot, {
+      matching: match, blockType: args.blockType, maxDistance: radius, count: 12,
+      kind: 'block', target: args.blockType,
+    });
+    let candidates = sel.candidates;
+    let skipped = sel.candidatesSkipped;
+    // Fallback for minimal mocks without plural search: singular findBlock
+    // returns Block|null directly.
+    if (candidates.length === 0 && sel.candidatesSeen === 0) {
       try {
-        const one = bot.findBlock({ matching: match, maxDistance: radius });
-        if (one) candidates = [one];
+        if (typeof bot.findBlock === 'function') {
+          const one = bot.findBlock({ matching: match, maxDistance: radius });
+          if (one && one.position) candidates = [one];
+        }
       } catch {
         // ignore
       }
     }
     if (candidates.length === 0) {
-      return fail('resource_not_seen', { candidatesSeen: 0, candidatesSkipped: 0 });
-    }
-    const me = bot?.entity?.position || null;
-    const dimension = targetFailures.botDimension(bot);
-    let skipped = 0;
-    for (const block of candidates) {
-      if (!block || !block.position) continue;
-      if (targetFailures.isExcluded({
-        dimension, kind: 'block', target: args.blockType,
-        position: block.position, fromPosition: me,
-      })) {
-        skipped += 1;
-        continue;
+      if (sel.candidatesSeen === 0) {
+        return fail('resource_not_seen', { candidatesSeen: 0, candidatesSkipped: 0 });
       }
-      return {
-        ok: true,
-        primitive: 'find_block',
-        blockType: block.name || args.blockType,
-        position: { x: block.position.x, y: block.position.y, z: block.position.z },
-        distance: distTo(bot, block.position),
-      };
+      return fail('no_reachable_target', {
+        candidatesSeen: sel.candidatesSeen,
+        candidatesSkipped: skipped,
+        error: `Found ${sel.candidatesSeen} ${args.blockType} but all unreachable from here (${skipped} skipped)`,
+      });
     }
-    return fail('no_reachable_target', {
-      candidatesSeen: candidates.length,
-      candidatesSkipped: skipped,
-      error: `Found ${candidates.length} ${args.blockType} but all unreachable from here (${skipped} skipped)`,
-    });
+    const block = candidates[0];
+    return {
+      ok: true,
+      primitive: 'find_block',
+      blockType: block.name || args.blockType,
+      position: { x: block.position.x, y: block.position.y, z: block.position.z },
+      distance: distTo(bot, block.position),
+    };
   } catch (err) {
     return { ok: false, primitive: 'find_block', blockType: args.blockType, error: err?.message || 'Block search failed' };
   }

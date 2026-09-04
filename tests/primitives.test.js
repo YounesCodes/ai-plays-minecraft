@@ -241,13 +241,12 @@ test('executePrimitive find_block skips cached unreachable candidates', async ()
   const bot = {
     entity: { position: { x: 0, y: 64, z: 0 } },
     game: { dimension: 'minecraft:overworld' },
-    findBlocks: ({ matching }) => {
-      const all = [
-        { name: 'oak_log', position: { x: 5, y: 64, z: 5 } },
-        { name: 'oak_log', position: { x: 40, y: 64, z: 40 } },
-      ];
-      return all.filter((b) => matching(b));
-    },
+    // Realistic mock: Vec3 positions + blockAt materialization.
+    findBlocks: () => [{ x: 5, y: 64, z: 5 }, { x: 40, y: 64, z: 40 }],
+    blockAt: (p) => ({
+      name: 'oak_log',
+      position: { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) },
+    }),
   };
   try {
     targetFailures.recordFailure({
@@ -272,7 +271,11 @@ test('executePrimitive find_block reports no_reachable_target honestly', async (
   const bot = {
     entity: { position: { x: 0, y: 64, z: 0 } },
     game: { dimension: 'minecraft:overworld' },
-    findBlocks: () => [{ name: 'oak_log', position: { x: 6, y: 64, z: 6 } }],
+    findBlocks: () => [{ x: 6, y: 64, z: 6 }],
+    blockAt: (p) => ({
+      name: 'oak_log',
+      position: { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) },
+    }),
   };
   try {
     targetFailures.recordFailure({

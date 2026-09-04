@@ -181,13 +181,13 @@ test('mine_block_type skips cached unreachable targets for alternates', async ()
       setGoal: () => {},
     },
     clearControlStates: () => {},
-    findBlocks: ({ matching }) => {
-      const all = [
-        { name: 'oak_log', position: { x: 5, y: 64, z: 5 } },
-        { name: 'oak_log', position: { x: 40, y: 64, z: 40 } },
-      ];
-      return all.filter((b) => matching(b));
-    },
+    // Realistic mock: findBlocks returns Vec3 positions (real Mineflayer),
+    // blockAt materializes them; matching is revalidated on Blocks.
+    findBlocks: () => [{ x: 5, y: 64, z: 5 }, { x: 40, y: 64, z: 40 }],
+    blockAt: (p) => ({
+      name: 'oak_log',
+      position: { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) },
+    }),
     dig: async (block) => {
       dug.push(`${block.position.x},${block.position.z}`);
       inv.push({ name: 'oak_log', count: 1 });
@@ -233,7 +233,11 @@ test('mine_block_type reports no_reachable_target vs resource_not_seen', async (
     assert.strictEqual(empty.ok, false);
     assert.strictEqual(empty.reason, 'resource_not_seen');
 
-    bot.findBlocks = () => [{ name: 'oak_log', position: { x: 6, y: 64, z: 6 } }];
+    bot.findBlocks = () => [{ x: 6, y: 64, z: 6 }];
+    bot.blockAt = (p) => ({
+      name: 'oak_log',
+      position: { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) },
+    });
     targetFailures.recordFailure({
       dimension: 'minecraft:overworld',
       kind: 'block',

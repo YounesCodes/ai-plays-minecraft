@@ -31,34 +31,19 @@ function countTotalInventory(bot) {
 const { raceWithAbort, stopBotMotion, gotoWithStallWatch, goalNear } = require('./movement');
 const { matchBlockName, blockAtPos } = require('../blocks');
 const targetFailures = require('../navigation/targetFailures');
+const { getSelectableBlocks } = require('../navigation/blockCandidates');
 
 function botPos(bot) {
   const p = bot?.entity?.position;
   return p ? { x: p.x, y: p.y, z: p.z } : null;
 }
 
-// Bounded candidate search: prefer findBlocks (plural) for alternates so one
-// bad nearest target never blocks the run; fall back to a single findBlock.
-function findCandidates(bot, blockType, maxDistance, count = 12) {
-  const match = matchBlockName(blockType);
-  try {
-    if (bot && typeof bot.findBlocks === 'function') {
-      const found = bot.findBlocks({ matching: match, maxDistance, count });
-      if (Array.isArray(found)) return found.filter(Boolean);
-    }
-  } catch {
-    // fall through to singular search
-  }
-  try {
-    if (bot && typeof bot.findBlock === 'function') {
-      const one = bot.findBlock({ matching: match, maxDistance });
-      return one ? [one] : [];
-    }
-  } catch {
-    // ignore
-  }
-  return [];
-}
+// Bounded candidate search via the shared Vec3->Block normalization layer
+// (src/navigation/blockCandidates.js). Real Mineflayer findBlocks() returns
+// Vec3 positions, not Blocks; the helper materializes, revalidates, dedupes,
+// excludes stale failures and ranks by generic actionability. Singular
+// findBlock() (returns Block|null) remains as a fallback when plural search
+// is unavailable or yields nothing (e.g. minimal mocks).
 
 function withinReach(me, pos, reach = 5) {
   // Unknown position (mocks): assume adjacent, preserving legacy behavior.
@@ -359,11 +344,15 @@ async function mineBlockType(bot, args, ctx = {}) {
     let candidatesSeen = 0;
     let candidatesSkipped = 0;
     let candidatesFailed = 0;
+    const failures = [];
     const seenKeys = new Set();
-    const partial = (reason, error) => failPartial({
-      blockType, tool, broken, uncollected, blocks, reason,
-      candidatesSeen, candidatesSkipped, candidatesFailed,
-      searchRadius: maxDistance, error,
+    const partial = (reason, error) => ({
+      ...failPartial({
+        blockType, tool, broken, uncollected, blocks, reason,
+        candidatesSeen, candidatesSkipped, candidatesFailed,
+        searchRadius: maxDistance, error,
+      }),
+      failures: failures.slice(-12),
     });
     for (let i = 0; i < count; i++) {
       const abort = abortedCheck(ctx);
@@ -373,37 +362,67 @@ async function mineBlockType(bot, args, ctx = {}) {
           aborted: true,
         };
       }
-      const me = botPos(bot);
-      const cands = findCandidates(bot, blockType, maxDistance, 12);
-      const eligible = [];
-      for (const c of cands) {
-        if (!c || !c.position) continue;
-        const k = `${c.position.x},${c.position.y},${c.position.z}`;
+      const match = matchBlockName(blockType);
+      const noteSeen = (pos) => {
+        if (!pos) return;
+        const k = `${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}`;
         if (!seenKeys.has(k)) {
           seenKeys.add(k);
           candidatesSeen += 1;
         }
-        if (targetFailures.isExcluded({
-          dimension, kind: 'block', target: blockType,
-          position: c.position, fromPosition: me,
-        })) {
-          candidatesSkipped += 1;
-          continue;
-        }
-        eligible.push(c);
-      }
-      if (eligible.length === 0) {
-        if (candidatesSeen === 0) {
-          return partial('resource_not_seen',
-            broken > 0
-              ? `Only broke ${broken} of ${count}; no ${blockType} found within ${maxDistance} blocks`
-              : `No ${blockType} found within ${maxDistance} blocks`);
-        }
-        return partial('no_reachable_target',
-          `Only broke ${broken} of ${count}; ${candidatesSeen} candidate(s) seen, ${candidatesSkipped} skipped as unreachable`);
-      }
+      };
+      // Per-log retry rounds: each round re-queries (failures from prior
+      // rounds are now excluded), so a slot works through the ranked list
+      // instead of aborting the whole run when the first top-4 are bad.
+      // Bounded: 3 rounds x 4 attempts. getSelectableBlocks already
+      // normalized Vec3->Block, deduped, excluded and ranked.
       let slotFilled = false;
-      for (const cand of eligible.slice(0, 4)) {
+      let slotHadCandidates = false;
+      for (let round = 0; round < 3 && !slotFilled; round++) {
+        if (abortedCheck(ctx)) {
+          return {
+            ...partial('aborted', `Aborted with ${broken}/${count} broken`),
+            aborted: true,
+          };
+        }
+        const me = botPos(bot);
+        const sel = getSelectableBlocks(bot, {
+          matching: match, blockType, maxDistance, count: 12, kind: 'block', target: blockType,
+        });
+        const eligible = [];
+        for (const c of sel.candidates) {
+          if (!c || !c.position) continue;
+          noteSeen(c.position);
+          eligible.push(c);
+        }
+        for (const c of sel.excluded || []) {
+          if (!c || !c.position) continue;
+          noteSeen(c.position);
+        }
+        candidatesSkipped += sel.candidatesSkipped;
+        // Fallback for minimal mocks without plural search: singular
+        // findBlock() returns Block|null directly. Per-round gate.
+        if (eligible.length === 0 && sel.candidatesSeen === 0) {
+          try {
+            if (bot && typeof bot.findBlock === 'function') {
+              const one = bot.findBlock({ matching: match, maxDistance });
+              if (one && one.position) {
+                const excluded = targetFailures.isExcluded({
+                  dimension, kind: 'block', target: blockType,
+                  position: one.position, fromPosition: me,
+                });
+                noteSeen(one.position);
+                if (!excluded) eligible.push(one);
+                else candidatesSkipped += 1;
+              }
+            }
+          } catch {
+            // ignore; honest empty below
+          }
+        }
+        if (eligible.length === 0) break; // nothing new this round
+        slotHadCandidates = true;
+        for (const cand of eligible.slice(0, 4)) {
         if (abortedCheck(ctx)) {
           return {
             ...partial('aborted', `Aborted with ${broken}/${count} broken`),
@@ -418,6 +437,12 @@ async function mineBlockType(bot, args, ctx = {}) {
               position: cand.position, reason: ap.reason, attemptedFrom: me,
             });
             candidatesFailed += 1;
+            try {
+              failures.push({
+                position: { x: cand.position.x, y: cand.position.y, z: cand.position.z },
+                reason: ap.reason || 'approach-failed',
+              });
+            } catch {}
             continue;
           }
         }
@@ -436,6 +461,12 @@ async function mineBlockType(bot, args, ctx = {}) {
             position: cand.position, reason: 'dig-failed', attemptedFrom: me,
           });
           candidatesFailed += 1;
+          try {
+            failures.push({
+              position: { x: cand.position.x, y: cand.position.y, z: cand.position.z },
+              reason: `dig-failed:${one.error || 'dig'}`.slice(0, 120),
+            });
+          } catch {}
           if (one.aborted) {
             return {
               ...partial('aborted', one.error || 'Dig failed'),
@@ -450,8 +481,15 @@ async function mineBlockType(bot, args, ctx = {}) {
         if (expectedDrop && !one.dropCollected) uncollected += 1;
         slotFilled = true;
         break;
-      }
+        } // end candidate attempts this round
+      } // end retry rounds for this log
       if (!slotFilled) {
+        if (!slotHadCandidates && candidatesSeen === 0) {
+          return partial('resource_not_seen',
+            broken > 0
+              ? `Only broke ${broken} of ${count}; no ${blockType} found within ${maxDistance} blocks`
+              : `No ${blockType} found within ${maxDistance} blocks`);
+        }
         return partial('no_reachable_target',
           `Could not reach any ${blockType} nearby (seen ${candidatesSeen}, skipped ${candidatesSkipped}, failed ${candidatesFailed})`);
       }
@@ -470,6 +508,8 @@ async function mineBlockType(bot, args, ctx = {}) {
     return {
       ok: true, primitive: 'mine_block_type', block: blockType, tool,
       broken, uncollected, blocks, dropObtained, expectedDropObserved: expectedDrop ? dropObtained : null,
+      candidatesSeen, candidatesSkipped, candidatesFailed, searchRadius: maxDistance,
+      failures: failures.slice(-12),
     };
   })();
   return raceWithAbort(bot, run, { timeoutMs, primitive: 'mine_block_type', ctx, extra: { block: blockType, tool } });

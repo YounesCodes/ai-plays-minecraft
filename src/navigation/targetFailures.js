@@ -14,6 +14,11 @@
 const MAX_ENTRIES = 500;
 const TTL_MS = 15 * 60 * 1000;
 const RELEVANCE_RADIUS = 12;
+// A stale navigation failure must not exclude a BLOCK the bot can now
+// directly reach. Conservative interaction distance, consistent with the
+// benchmark skip-healing (<4 blocks) and inside the mining dig reach (5).
+// Generic: applies to any block kind/target, not just logs.
+const ADJACENCY_HEAL_DISTANCE = 4;
 
 const store = new Map(); // key -> record (insertion-ordered for FIFO prune)
 
@@ -69,6 +74,29 @@ function isExcluded({ dimension = 'overworld', kind, target, position, fromPosit
     store.delete(key);
     return null;
   }
+  // Adjacency healing: standing next to the target heals a stale
+  // navigation failure. A block within direct interaction reach is
+  // reachable BY DEFINITION — the bot must be allowed to retry it.
+  if (kind === 'block' && fromPosition && position) {
+    try {
+      const fx = Number(fromPosition.x);
+      const fy = Number(fromPosition.y);
+      const fz = Number(fromPosition.z);
+      const px = Number(position.x);
+      const py = Number(position.y);
+      const pz = Number(position.z);
+      if ([fx, fy, fz, px, py, pz].every((n) => Number.isFinite(n))) {
+        const dx = fx - px;
+        const dy = fy - py;
+        const dz = fz - pz;
+        if (dx * dx + dy * dy + dz * dz < ADJACENCY_HEAL_DISTANCE * ADJACENCY_HEAL_DISTANCE) {
+          return null;
+        }
+      }
+    } catch {
+      // ignore healing check; fall through to relevance logic
+    }
+  }
   if (fromPosition && rec.attemptedFrom) {
     const dx = fromPosition.x - rec.attemptedFrom.x;
     const dy = fromPosition.y - rec.attemptedFrom.y;
@@ -83,7 +111,7 @@ function clear() {
 }
 
 function stats() {
-  return { size: store.size, maxEntries: MAX_ENTRIES, ttlMs: TTL_MS, relevanceRadius: RELEVANCE_RADIUS };
+  return { size: store.size, maxEntries: MAX_ENTRIES, ttlMs: TTL_MS, relevanceRadius: RELEVANCE_RADIUS, adjacencyHealDistance: ADJACENCY_HEAL_DISTANCE };
 }
 
 function botDimension(bot) {
@@ -106,4 +134,5 @@ module.exports = {
   MAX_ENTRIES,
   TTL_MS,
   RELEVANCE_RADIUS,
+  ADJACENCY_HEAL_DISTANCE,
 };
