@@ -6,6 +6,13 @@ const { nowIso } = require('../memory/store');
 
 const DEFAULT_DIRECTIVE = 'Survive, learn, explore and progress through Minecraft autonomously. Decide your own goals from what you observe, what you know and what you have learned from experience. Avoid unnecessary death.';
 
+// Conservative textual normalization for goal reaffirmation detection:
+// trim, collapse repeated whitespace, case-insensitive comparison. Purely
+// lexical — no semantic/fuzzy matching.
+function normalizeGoalText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
 function createGoalManager(options = {}) {
   const primaryDirective = options.directive || process.env.AGENT_DIRECTIVE || DEFAULT_DIRECTIVE;
   let currentGoal = options.initialGoal
@@ -37,6 +44,9 @@ function createGoalManager(options = {}) {
       reason: String(opts.reason || '').slice(0, 300),
       createdAt: nowIso(),
       status: 'active',
+      // Factual: the loop step at which this goal became active (used only
+      // for goalAgeSteps context; never drives expiry or change).
+      activatedAtStep: Number.isFinite(Number(opts.setAtStep)) ? Number(opts.setAtStep) : null,
     };
     if (Array.isArray(opts.subgoals)) {
       subgoals = opts.subgoals.filter((s) => typeof s === 'string').map((s) => s.slice(0, 200)).slice(0, 8);
@@ -70,6 +80,7 @@ function createGoalManager(options = {}) {
       reason: String(opts.reason || 'Interrupt preempted previous goal').slice(0, 300),
       createdAt: nowIso(),
       status: 'active',
+      activatedAtStep: Number.isFinite(Number(opts.setAtStep)) ? Number(opts.setAtStep) : null,
       emergency: true, // set by interrupt preemption; cleared when resumed via completeGoal()
     };
     return { ok: true, goal: { ...currentGoal }, suspended: { ...suspendedGoal } };
@@ -89,4 +100,4 @@ function createGoalManager(options = {}) {
   return { getState, setGoal, completeGoal, suspendFor, failGoal, getHistory, primaryDirective };
 }
 
-module.exports = { createGoalManager, DEFAULT_DIRECTIVE };
+module.exports = { createGoalManager, DEFAULT_DIRECTIVE, normalizeGoalText };

@@ -157,12 +157,25 @@ test('benchmark loop completes when logs already present (no LLM)', async () => 
 
 test('categorizePlannerError buckets invalid planner output', () => {
   const { categorizePlannerError } = require('../src/agent/cognition');
-  assert.strictEqual(categorizePlannerError(new Error('OpenRouter returned invalid JSON')), 'parse-failure');
-  assert.strictEqual(categorizePlannerError(new Error('Invalid plan step: Unknown primitive: fly')), 'unknown-primitive');
-  assert.strictEqual(categorizePlannerError(new Error('Invalid plan step: Unknown skill: foo')), 'unknown-skill');
-  assert.strictEqual(categorizePlannerError(new Error('Unexpected decision field: "plan"')), 'unexpected-fields');
-  assert.strictEqual(categorizePlannerError(new Error('attack_entity: unexpected argument "speed"')), 'invalid-args');
-  assert.strictEqual(categorizePlannerError(new Error('mine_block: missing required argument "x"')), 'missing-fields');
+  // Typed transport/provider errors keep their own categories: a timeout or
+  // HTTP failure must never be reported as a JSON parse failure.
+  assert.strictEqual(categorizePlannerError({ code: 'transport_timeout', message: 'timed out' }), 'transport_timeout');
+  assert.strictEqual(categorizePlannerError({ code: 'transport_network', message: 'socket hang up' }), 'transport_network');
+  assert.strictEqual(categorizePlannerError({ code: 'transport_http', message: 'OpenRouter HTTP 502' }), 'transport_http');
+  assert.strictEqual(categorizePlannerError({ code: 'provider_response_invalid', message: 'no assistant content' }), 'provider_response_invalid');
+  // Model answered, but the content was not extractable JSON.
+  assert.strictEqual(categorizePlannerError(new Error('Planner returned invalid JSON: {"assessment"')), 'parse_failure');
+  assert.strictEqual(categorizePlannerError(new Error('Planner returned non-JSON: hello')), 'parse_failure');
+  // Valid JSON rejected by the local validator.
+  assert.strictEqual(categorizePlannerError(new Error('Planner output failed validation: Invalid plan step: Unknown primitive: fly')), 'unknown_primitive');
+  assert.strictEqual(categorizePlannerError(new Error('Invalid plan step: Unknown skill: foo')), 'unknown_skill');
+  assert.strictEqual(categorizePlannerError(new Error('Unexpected decision field: "plan"')), 'unexpected_fields');
+  assert.strictEqual(categorizePlannerError(new Error('Unexpected goalChange field: "createdAt"')), 'unexpected_fields');
+  assert.strictEqual(categorizePlannerError(new Error('attack_entity: unexpected argument "speed"')), 'invalid_args');
+  assert.strictEqual(categorizePlannerError(new Error('mine_block: missing required argument "x"')), 'invalid_args');
+  assert.strictEqual(categorizePlannerError(new Error('lookup_recipe: forbidden field "url"')), 'invalid_args');
+  assert.strictEqual(categorizePlannerError(new Error('assessment must be a non-empty string (max 500 chars)')), 'schema_validation');
+  assert.strictEqual(categorizePlannerError(new Error('nextStep is required')), 'schema_validation');
   assert.strictEqual(categorizePlannerError(new Error('something completely different')), 'other');
 });
 

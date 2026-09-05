@@ -97,10 +97,18 @@ function summarizeOpportunities(perception, maxGroups = 6) {
   return out;
 }
 
-function buildContext({ directive, goalState, perception, lastResult = null, recentEvents = [], relevantMemories = {}, availableSkills = [], model = null, exploration = null, deathSignal = null, actionHistory = [], stagnation = null, oscillation = null }) {
+function buildContext({ directive, goalState, perception, lastResult = null, recentEvents = [], relevantMemories = {}, availableSkills = [], model = null, exploration = null, deathSignal = null, actionHistory = [], stagnation = null, oscillation = null, currentStep = null }) {
+  // Factual goal age in cognition turns. Never used to force expiry or
+  // change — the model owns goal lifetime.
+  const goalAgeSteps = goalState?.currentGoal
+    && Number.isFinite(Number(goalState.currentGoal.activatedAtStep))
+    && Number.isFinite(Number(currentStep))
+    ? Math.max(0, Math.floor(Number(currentStep) - Number(goalState.currentGoal.activatedAtStep)))
+    : null;
   return {
     directive: directive || process.env.AGENT_DIRECTIVE || DEFAULT_DIRECTIVE,
     currentGoal: goalState?.currentGoal || null,
+    goalAgeSteps,
     subgoals: goalState?.subgoals || [],
     suspendedGoal: goalState?.suspendedGoal || null,
     state: summarizePerception(perception),

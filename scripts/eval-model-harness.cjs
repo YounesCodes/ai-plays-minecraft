@@ -309,16 +309,16 @@ function buildContextFor(sc) {
   });
 }
 
-async function runOne(sc, rep, knownSkillNames) {
+async function runOne(sc, rep, knownSkillNames, structuredOutput = false) {
   const context = buildContextFor(sc);
   const t0 = Date.now();
-  let record = { scenario: sc.id, rep, modelRequested: process.env.OPENROUTER_MODEL || null };
+  let record = { scenario: sc.id, rep, modelRequested: process.env.OPENROUTER_MODEL || null, mode: structuredOutput ? 'structured' : 'plain' };
   let decision = null;
   let raw = null;
   let ok = false;
   let category = null;
   try {
-    const res = await planAutonomous({ context, knownSkillNames });
+    const res = await planAutonomous({ context, knownSkillNames, structuredOutput });
     decision = res.decision;
     ok = true;
     record.modelReturned = res.model || null;
@@ -395,6 +395,7 @@ async function main() {
   const model = argOf('--model', null);
   if (model) process.env.OPENROUTER_MODEL = model;
   const reps = Math.max(1, parseInt(argOf('--reps', '8'), 10) || 8);
+  const structured = argv.includes('--structured');
   const only = argOf('--only', null);
   const scenarios = only ? SCENARIOS.filter((s) => only.split(',').includes(s.id)) : SCENARIOS;
   if (!process.env.OPENROUTER_MODEL) {
@@ -407,14 +408,15 @@ async function main() {
   }
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const outFile = argOf('--out', path.join('logs', `model-eval-${stamp}.json`));
-  console.log(JSON.stringify({ eval: 'model-harness', model: process.env.OPENROUTER_MODEL, reps, scenarios: scenarios.map((s) => s.id), temperature: 0.4 }));
+  const modeTag = structured ? 'structured' : 'plain';
+  const outFile = argOf('--out', path.join('logs', `model-eval-${modeTag}-${stamp}.json`));
+  console.log(JSON.stringify({ eval: 'model-harness', model: process.env.OPENROUTER_MODEL, reps, mode: modeTag, scenarios: scenarios.map((s) => s.id), temperature: 0.4 }));
 
   const records = [];
   for (let rep = 1; rep <= reps; rep++) {
     for (const sc of scenarios) {
       const knownSkillNames = sc.knownSkills.map((s) => s.name).concat(sc.knownSkills.map((s) => s.id));
-      const record = await runOne(sc, rep, knownSkillNames);
+      const record = await runOne(sc, rep, knownSkillNames, structured);
       records.push(record);
       console.log(JSON.stringify({ scenario: sc.id, rep, ok: record.ok, pass: record.pass, category: record.category || null, next: record.nextStep ? `${record.nextStep.type}:${record.nextStep.name}` : null, notes: record.notes, latencyMs: record.latencyMs }));
     }
@@ -422,7 +424,7 @@ async function main() {
 
   const summary = aggregate(records);
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
-  fs.writeFileSync(outFile, JSON.stringify({ eval: 'model-harness', model: process.env.OPENROUTER_MODEL, reps, temperature: 0.4, summary, records }, null, 1));
+  fs.writeFileSync(outFile, JSON.stringify({ eval: 'model-harness', model: process.env.OPENROUTER_MODEL, reps, mode: modeTag, temperature: 0.4, summary, records }, null, 1));
   console.log(JSON.stringify({ summary: true, file: outFile, byModel: summary }));
 }
 

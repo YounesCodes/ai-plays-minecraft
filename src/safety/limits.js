@@ -41,7 +41,7 @@ function getLimits() {
     agentMode: strEnv('AGENT_MODE', 'autonomous').toLowerCase() === 'benchmark' ? 'benchmark' : 'autonomous',
     agentDirective: strEnv(
       'AGENT_DIRECTIVE',
-      'Survive and progress through Minecraft autonomously. Maintain health and food, explore, acquire resources, improve equipment, establish useful shelter and storage, learn from experience, and pursue increasingly advanced Minecraft progression while avoiding unnecessary death.'
+      'Survive, learn, explore and progress through Minecraft autonomously. Decide your own goals from what you observe, what you know and what you have learned from experience. Avoid unnecessary death.'
     ),
     agentGoal: strEnv('AGENT_GOAL', 'Collect 8 logs without dying.'),
     maxSteps,
@@ -85,4 +85,21 @@ function isGoalComplete(inventory, required = 8) {
   return countLogsInInventory(inventory) >= required;
 }
 
-module.exports = { getLimits, countLogsInInventory, isGoalComplete, intEnv, boolEnv, strEnv };
+// Explicit autonomous planner output budget. Measured on DeepSeek V4 Flash
+// synthetic decisions: completion tokens p50 319 / p90 684 / p95 826 /
+// max 1137 (reasoning tokens inflate these); Nemo max 126. 1536 gives
+// ~1.35x headroom over the observed max while preventing runaway output.
+// Without an explicit budget the provider default once truncated a valid
+// DeepSeek decision mid-JSON.
+function autonomousMaxTokens() {
+  return intEnv('AUTONOMOUS_MAX_TOKENS', 1536, 128, 8192);
+}
+
+// Reflection-v2 outputs are small (summary/lesson/memory), but reasoning
+// models spend completion tokens thinking before the JSON. Separate budget
+// from the planner so one can be tuned without touching the other.
+function reflectionMaxTokens() {
+  return intEnv('REFLECTION_MAX_TOKENS', 1024, 128, 8192);
+}
+
+module.exports = { getLimits, countLogsInInventory, isGoalComplete, autonomousMaxTokens, reflectionMaxTokens, intEnv, boolEnv, strEnv };

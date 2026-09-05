@@ -20,6 +20,24 @@ function getConfig() {
   };
 }
 
+// Typed transport/provider errors so telemetry can distinguish "no model
+// output ever existed" (transport/provider problems) from "the model said
+// something malformed" (parse_failure) and "valid JSON failed local
+// validation" (schema categories in cognition.categorizePlannerError).
+// code: 'transport_timeout' | 'transport_network' | 'transport_http'
+//     | 'provider_response_invalid'
+function transportError(code, message, extra = {}) {
+  const err = new Error(message);
+  err.name = 'LlmTransportError';
+  err.code = code;
+  Object.assign(err, extra);
+  return err;
+}
+
+function isAbort(err) {
+  return !!err && (err.name === 'TimeoutError' || err.name === 'AbortError' || err.code === 'ABORT_ERR');
+}
+
 // Clean OpenRouter wrapper. The rest of the codebase never calls fetch
 // directly; all OpenRouter specifics stay here.
 async function complete(messages, options = {}) {
@@ -35,6 +53,10 @@ async function complete(messages, options = {}) {
     temperature: options.temperature ?? 0.2,
   };
   if (options.maxTokens) body.max_tokens = options.maxTokens;
+  if (options.responseFormat) body.response_format = options.responseFormat;
+  // Provider routing hints (e.g. { require_parameters: true } to guarantee
+  // structured-output-capable endpoints). Internal, trusted callers only.
+  if (options.provider) body.provider = options.provider;
 
   let res;
   const startedAt = Date.now();
@@ -50,7 +72,10 @@ async function complete(messages, options = {}) {
       signal: AbortSignal.timeout(requestTimeoutMs()),
     });
   } catch (err) {
-    throw new Error(`OpenRouter request failed: ${err && err.message ? err.message : err}`);
+    if (isAbort(err)) {
+      throw transportError('transport_timeout', `OpenRouter request timed out after ${Date.now() - startedAt}ms (model=${finalModel})`, { cause: String(err && err.message || err).slice(0, 200) });
+    }
+    throw transportError('transport_network', `OpenRouter request failed: ${err && err.message ? err.message : err}`);
   }
   const elapsedMs = Date.now() - startedAt;
   if (elapsedMs > 15000) {
@@ -63,22 +88,31 @@ async function complete(messages, options = {}) {
     }
   }
 
-  const text = await res.text().catch(() => '');
+  let text;
+  try {
+    text = await res.text();
+  } catch (err) {
+    // The abort can land during body read: still a transport failure, not
+    // a malformed-provider-response problem.
+    if (isAbort(err)) {
+      throw transportError('transport_timeout', `OpenRouter response read timed out after ${elapsedMs}ms (model=${finalModel})`, { cause: String(err && err.message || err).slice(0, 200) });
+    }
+    throw transportError('transport_network', `OpenRouter response read failed: ${err && err.message ? err.message : err}`);
+  }
   if (!res.ok) {
-    const snippet = text.slice(0, 500);
-    throw new Error(`OpenRouter HTTP ${res.status}: ${snippet}`);
+    throw transportError('transport_http', `OpenRouter HTTP ${res.status}: ${text.slice(0, 300)}`, { status: res.status });
   }
 
   let data;
   try {
     data = JSON.parse(text);
   } catch {
-    throw new Error('OpenRouter returned invalid JSON');
+    throw transportError('provider_response_invalid', `OpenRouter returned invalid JSON envelope (status ${res.status})`);
   }
 
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content !== 'string' || content.length === 0) {
-    throw new Error('OpenRouter returned no assistant content');
+    throw transportError('provider_response_invalid', 'OpenRouter returned no assistant content');
   }
 
   return {

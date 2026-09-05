@@ -12,7 +12,7 @@ const { createPerceptionCache } = require('../bot/perception');
 const { detectInterrupts, isUrgent } = require('../bot/interrupts');
 const { validateAction } = require('../safety/validator');
 const { getLimits, countLogsInInventory, isGoalComplete } = require('../safety/limits');
-const { createGoalManager } = require('./goals');
+const { createGoalManager, normalizeGoalText } = require('./goals');
 const { buildContext } = require('./context');
 const { categorizePlannerError } = require('./cognition');
 const { createActionHistory } = require('./actionHistory');
@@ -377,7 +377,7 @@ async function runAutonomousLoop(bot, options = {}) {
           const desc = emergencyGoalFor(topInterrupt);
           if (desc) {
             const prev = goalManager.getState().currentGoal?.description || null;
-            goalManager.suspendFor(desc, { priority: topInterrupt.priority, reason: topInterrupt.reason || topInterrupt.type });
+            goalManager.suspendFor(desc, { priority: topInterrupt.priority, reason: topInterrupt.reason || topInterrupt.type, setAtStep: step });
             metrics.inc('goalChanges');
             decisions.record('goal_changed', { from: prev, to: desc, reason: topInterrupt.reason || topInterrupt.type });
           }
@@ -464,6 +464,20 @@ async function runAutonomousLoop(bot, options = {}) {
       } catch {
         relevant = { semantic: [], episodic: [], procedural: [], world: [] };
       }
+      // Retrieval traceability: exactly the bounded memories the planner
+      // will receive this turn (same slices buildContext applies), so
+      // write -> retrieval chains are observable by ID.
+      try {
+        decisions.record('memory_retrieved', {
+          step,
+          semantic: relevant.semantic.slice(0, 6).map((m) => ({ id: m?.id ?? null, subject: String(m?.subject || '').slice(0, 80) })),
+          episodic: relevant.episodic.slice(0, 4).map((m) => ({ id: m?.id ?? null, summary: String(m?.summary || '').slice(0, 80) })),
+          procedural: relevant.procedural.slice(0, 4).map((m) => ({ id: m?.id ?? null, skillId: m?.skillId ?? null })),
+          world: relevant.world.slice(0, 6).map((m) => ({ name: m?.name ?? null })),
+        });
+      } catch {
+        // telemetry must never break the loop
+      }
 
       // 4-6. Fresh cognition every tick. executeNextStep() below awaits the
       // whole primitive/skill, so when it returns there is NO in-progress
@@ -513,6 +527,7 @@ async function runAutonomousLoop(bot, options = {}) {
         actionHistory: actionHistory.summary(),
         stagnation,
         oscillation,
+        currentStep: step,
       });
       let decision = null;
       try {
@@ -905,24 +920,31 @@ function rankRelevantSkills(skills, relevant) {
 }
 
 // Goal update for the slim contract: a present goalChange replaces the
-// current goal; null keeps it. No description-drift replacement, so goals
-// cannot thrash. Skill creation and memory creation are NOT hot-path
-// behaviors: skills execute from the existing library, memories are written
-// by reflection/outcome paths (death, milestones, discoveries) instead of
-// every reasoning turn. Skill generation stays available as a separate
-// operation (src/skills/generator.js); a future trigger is repeated
-// successful primitive sequences or reflection-identified procedures.
+// current goal; null keeps it. A re-assertion of the SAME goal (after
+// trim/whitespace-collapse/case normalization) is a reaffirmation, not a
+// change: the goal, its createdAt and its age stay untouched and only a
+// self_goal_reaffirmed event is recorded. No semantic/fuzzy matching.
 function applyGoalChange({ validated, goalManager, step }) {
   const incoming = validated.goalChange || null;
   if (!incoming) {
     logger.debug('Keeping current goal; planner sent goalChange:null.');
     return;
   }
-  const prev = goalManager.getState().currentGoal?.description || null;
+  const gs = goalManager.getState();
+  const prev = gs.currentGoal?.description || null;
+  if (prev !== null && normalizeGoalText(incoming.description) === normalizeGoalText(prev)) {
+    decisions.record('self_goal_reaffirmed', {
+      step,
+      goal: incoming.description.slice(0, 200),
+      reason: String(incoming.reason || '').slice(0, 200),
+    });
+    return;
+  }
   goalManager.setGoal(incoming.description, {
     priority: incoming.priority,
     reason: incoming.reason,
     subgoals: [],
+    setAtStep: step,
   });
   metrics.inc('goalChanges');
   decisions.record('goal_changed', { from: prev, to: incoming.description, reason: incoming.reason, step });
@@ -1056,10 +1078,11 @@ async function tryReflect({ event, goal, stateBefore, attempted, result, stateAf
   try {
     const prompt = buildReflectionPrompt({ goal, stateBefore, attempted, result, stateAfter, relevantMemories });
     metrics.inc('llmCalls');
+    const { reflectionMaxTokens } = require('../safety/limits');
     const res = await complete([
       { role: 'system', content: 'You reflect on Minecraft survival experiences. Output exactly one JSON object.' },
       { role: 'user', content: prompt },
-    ], { temperature: 0.3 });
+    ], { temperature: 0.3, maxTokens: reflectionMaxTokens() });
     const parsed = parseReflectionResponse(res.content);
     if (!parsed.ok) {
       metrics.inc('llmErrors');
@@ -1075,18 +1098,36 @@ async function tryReflect({ event, goal, stateBefore, attempted, result, stateAf
 
     // At most one memory per reflection; no goal changes, no skill work.
     // Goal management belongs to cognition; memories capture experience.
+    // Writes are traceable by the actual store ID so write -> retrieval
+    // chains can be audited later.
     if (memoryEnabled() && r.memory) {
       try {
         if (r.memory.kind === 'semantic') {
           const w = writeSemanticMemory({ ...r.memory, source: 'reflection' });
-          if (w?.ok) metrics.inc('memoriesWritten');
+          if (w?.ok) {
+            metrics.inc('memoriesWritten');
+            decisions.record('reflection_memory_written', {
+              step,
+              kind: 'semantic',
+              memoryId: w.id ?? null,
+              subject: String(r.memory.subject || '').slice(0, 80),
+            });
+          }
         } else if (r.memory.kind === 'episodic') {
           const w = writeEpisodicMemory({
             summary: r.memory.summary,
             lesson: r.memory.lesson || '',
             context: { position: stateAfter?.position || null },
           });
-          if (w?.ok) metrics.inc('memoriesWritten');
+          if (w?.ok) {
+            metrics.inc('memoriesWritten');
+            decisions.record('reflection_memory_written', {
+              step,
+              kind: 'episodic',
+              memoryId: w.id ?? null,
+              summary: String(r.memory.summary || '').slice(0, 80),
+            });
+          }
         }
       } catch {
         // ignore

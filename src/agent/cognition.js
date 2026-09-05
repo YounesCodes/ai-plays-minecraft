@@ -104,21 +104,31 @@ function needsPlanner({ interrupt = null, goalState = null, lastResult = null, t
   return { needed: false, reason: 'deterministic-progress' };
 }
 
-// Classify invalid planner responses for telemetry (model + category, never
-// secrets). Lets us measure whether the rich schema is too ambitious for
-// small models before redesigning the contract.
+// Error taxonomy for planner failures. Three fundamentally different
+// failure families must never be blurred:
+//   1. transport/provider: no usable model output existed
+//      (transport_timeout, transport_network, transport_http,
+//       provider_response_invalid — typed codes from llm/openrouter.js)
+//   2. parse_failure: the model answered but the content was not extractable
+//      JSON
+//   3. local schema/validation: valid JSON rejected by OUR validator
+//      (schema_validation, unknown_skill, unknown_primitive, invalid_args,
+//       unexpected_fields)
+const TRANSPORT_CODES = new Set(['transport_timeout', 'transport_network', 'transport_http', 'provider_response_invalid']);
+
 function categorizePlannerError(err) {
+  const code = err && err.code;
+  if (typeof code === 'string' && TRANSPORT_CODES.has(code)) return code;
   const m = String((err && err.message) || err || '');
-  if (/not valid JSON|invalid JSON|Unexpected token|contained no JSON/i.test(m)) return 'parse-failure';
-  if (/Unknown primitive/i.test(m)) return 'unknown-primitive';
-  if (/Unknown skill/i.test(m)) return 'unknown-skill';
-  if (/Unexpected decision field|Unexpected goalChange field/i.test(m)) return 'unexpected-fields';
-  if (/too many steps/i.test(m)) return 'plan-too-long';
-  if (/Skill .*must be|Skill has/i.test(m)) return 'skill-schema';
-  if (/unexpected argument|Invalid plan step|Invalid nextStep|must be one of|destination must be|goalChange/i.test(m)) {
-    return 'invalid-args';
-  }
-  if (/Missing|required|must be/i.test(m)) return 'missing-fields';
+  // Model output existed but was not extractable/parseable JSON.
+  if (/Planner returned (non-JSON|invalid JSON)|contained no JSON|Unexpected token|Unexpected end of JSON/i.test(m)) return 'parse_failure';
+  // Valid JSON rejected by the local contract validator.
+  if (/Unexpected decision field|Unexpected goalChange field/i.test(m)) return 'unexpected_fields';
+  if (/Unknown skill/i.test(m)) return 'unknown_skill';
+  if (/Unknown primitive|No executor/i.test(m)) return 'unknown_primitive';
+  if (/forbidden field|unexpected argument|missing required argument|must be a scalar|must be one of|invalid format|has invalid format|must be an integer|must be a string|must be a finite number|must be a boolean|must be data, not code/i.test(m)) return 'invalid_args';
+  // Remaining local-schema rejections (shape/length/required fields).
+  if (/must be|is required|Decision must be|goalChange|assessment|nextStep|Skill arg|Skill step|Plan step|too long|schema/i.test(m)) return 'schema_validation';
   return 'other';
 }
 

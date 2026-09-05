@@ -10,10 +10,57 @@ const {
   buildSystemPromptAutonomous, buildUserMessageAutonomous,
 } = require('./prompts');
 const { validateAutonomousDecision, categorizePlannerError } = require('./cognition');
+const { autonomousMaxTokens } = require('../safety/limits');
 const metrics = require('../telemetry/metrics');
 
 // Slim hot-path contract version for before/after telemetry comparison.
 const AUTONOMOUS_CONTRACT = 'autonomous-v2';
+
+// Provider-enforced JSON Schema for the autonomous-v2 STRUCTURAL SHELL only.
+// This never replaces local validation: primitive names, argument schemas,
+// known skills, and field-level rules are still enforced by
+// validateAutonomousDecision afterwards. args stays a free-form object —
+// the local primitive schemas remain the single source of truth for args.
+function autonomousResponseFormat() {
+  return {
+    type: 'json_schema',
+    json_schema: {
+      name: 'autonomous_decision',
+      strict: true,
+      schema: {
+        type: 'object',
+        properties: {
+          assessment: { type: 'string' },
+          goalChange: {
+            type: ['object', 'null'],
+            properties: {
+              description: { type: 'string' },
+              priority: { type: 'integer' },
+              reason: { type: 'string' },
+            },
+            required: ['description', 'priority', 'reason'],
+            additionalProperties: false,
+          },
+          nextStep: {
+            type: 'object',
+            properties: {
+              type: { type: 'string', enum: ['primitive', 'skill'] },
+              name: { type: 'string' },
+              // Free-form on purpose: primitive argument rules are owned by
+              // the local primitive schemas, which stay authoritative. Null
+              // args are normalized away by local validation.
+              args: { type: ['object', 'null'] },
+            },
+            required: ['type', 'name', 'args'],
+            additionalProperties: false,
+          },
+        },
+        required: ['assessment', 'goalChange', 'nextStep'],
+        additionalProperties: false,
+      },
+    },
+  };
+}
 
 function stripCodeFences(text) {
   let t = String(text).trim();
@@ -63,7 +110,10 @@ async function plan({ goal, state, lastResult }) {
 // Autonomous planner: ONE compact decision per tick (contract autonomous-v2),
 // validated before return. Skill creation and memory creation are NOT part
 // of this response — they run through their own separate paths.
-async function planAutonomous({ context, knownSkillNames = [], temperature = 0.4 }) {
+// options.structuredOutput: ask the provider to enforce the autonomous-v2
+// shell via response_format json_schema (A/B tested; local validation stays
+// authoritative either way).
+async function planAutonomous({ context, knownSkillNames = [], temperature = 0.4, structuredOutput = false }) {
   const skills = context?.availableRelevantSkills || [];
   const messages = [
     { role: 'system', content: buildSystemPromptAutonomous(context?.directive, skills) },
@@ -73,11 +123,25 @@ async function planAutonomous({ context, knownSkillNames = [], temperature = 0.4
   metrics.inc('plannerCalls');
   let result;
   try {
-    result = await complete(messages, { temperature });
+    result = await complete(messages, {
+      temperature,
+      maxTokens: autonomousMaxTokens(),
+      ...(structuredOutput ? {
+        responseFormat: autonomousResponseFormat(),
+        // Mechanical requirement for a fair structured-output condition:
+        // without this, routing may land on endpoints that treat the schema
+        // as a hint (or ignore it), polluting condition B.
+        provider: { require_parameters: true },
+      } : {}),
+    });
   } catch (err) {
     metrics.inc('llmErrors');
     metrics.inc('plannerInvalid');
-    metrics.inc('plannerInvalid_transport');
+    try {
+      metrics.inc(`plannerInvalid_${categorizePlannerError(err)}`);
+    } catch {
+      // counter name must never break planning
+    }
     throw err;
   }
   const parsed = (() => {
@@ -86,7 +150,7 @@ async function planAutonomous({ context, knownSkillNames = [], temperature = 0.4
     } catch (err) {
       metrics.inc('llmErrors');
       metrics.inc('plannerInvalid');
-      metrics.inc('plannerInvalid_parse-failure');
+      metrics.inc('plannerInvalid_parse_failure');
       throw err;
     }
   })();
@@ -109,4 +173,4 @@ async function planAutonomous({ context, knownSkillNames = [], temperature = 0.4
   return { decision: check.value, contract: AUTONOMOUS_CONTRACT, model: result.model, usage: result.usage || null };
 }
 
-module.exports = { plan, planAutonomous, extractJson, AUTONOMOUS_CONTRACT };
+module.exports = { plan, planAutonomous, extractJson, AUTONOMOUS_CONTRACT, autonomousResponseFormat };

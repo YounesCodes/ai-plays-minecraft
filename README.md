@@ -135,7 +135,9 @@ npm run check
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `OPENROUTER_API_KEY` | — | Required. Never logged. |
-| `OPENROUTER_MODEL` | `openrouter/free` | Model id. |
+| `OPENROUTER_MODEL` | `openrouter/free` | Model id. Preferred serious autonomy model: `deepseek/deepseek-v4-flash-0731` (A/B-evaluated). `mistralai/mistral-nemo` remains a cheap lightweight baseline for synthetic checks. |
+| `AUTONOMOUS_MAX_TOKENS` | `1536` | Planner output budget. DeepSeek completions measured p95=826, max=1137 tokens. |
+| `REFLECTION_MAX_TOKENS` | `1024` | Separate reflection output budget. |
 | `OPENROUTER_APP_NAME` | `AI Plays Minecraft` | Sent as `X-Title`. |
 | `OPENROUTER_TIMEOUT_MS` | 60000 | HTTP timeout per LLM call (ms). |
 | `MC_HOST` / `MC_PORT` | `127.0.0.1` / `25565` | Paper server. |
