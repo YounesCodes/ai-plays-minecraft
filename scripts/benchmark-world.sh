@@ -18,6 +18,11 @@ set -euo pipefail
 #   scripts/benchmark-world.sh status [--lab-dir DIR]
 #   scripts/benchmark-world.sh prepare <name|fresh> --confirm [--lab-dir DIR] [--seed N]
 #   scripts/benchmark-world.sh restore <name> --confirm [--lab-dir DIR]
+#   scripts/benchmark-world.sh id [--lab-dir DIR]
+#
+# World-instance identity (<world>/.ai-world-id): fresh worlds always mint
+# a NEW id (same seed = different instance); restores carry their snapshot's
+# own id; `id` assigns one to legacy worlds without touching game data.
 #
 # prepare <name>:  active world -> snapshots/previous-<timestamp>/, then
 #                  snapshots/<name>/ -> active world.
@@ -34,6 +39,40 @@ set -euo pipefail
 LAB_DIR="${HOME}/minecraft-lab"
 CONFIRM=0
 SEED=""
+
+# World-instance identity sidecar (src/world/instance.js contract):
+# <world>/.ai-world-id = {"id":"world_<16hex>","seed":...,"createdAt":...}.
+# Fresh worlds always mint a NEW id (same seed = different instance).
+# Snapshots carry their own id inside the world dir. Paper ignores dotfiles.
+write_world_id() {
+  # $1 = world dir, $2 = seed or empty
+  local dir="$1" seed="$2" id now
+  id="world_$(od -An -tx1 -N8 /dev/urandom 2>/dev/null | tr -d ' \n' || echo "fallback$RANDOM$RANDOM" | cksum | cut -d' ' -f1)"
+  now="$(date -u +%FT%TZ 2>/dev/null || date +%FT%TZ)"
+  mkdir -p "$dir"
+  printf '{\n  "id": "%s",\n  "seed": %s,\n  "createdAt": "%s"\n}\n' \
+    "$id" "$([ -n "$seed" ] && printf '"%s"' "$seed" || printf 'null')" "$now" > "$dir/.ai-world-id"
+  echo "$id"
+}
+
+read_world_id() {
+  # $1 = world dir; prints id or nothing
+  local f="$1/.ai-world-id" id
+  if [ -f "$f" ]; then
+    id="$(grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" 2>/dev/null | cut -d'"' -f4)"
+    case "$id" in
+      world_*) printf '%s' "$id" ;;
+    esac
+  fi
+}
+
+ensure_world_id() {
+  # $1 = world dir, $2 = seed or empty; assigns only when missing
+  local cur
+  cur="$(read_world_id "$1")"
+  if [ -n "$cur" ]; then printf '%s' "$cur"; return 0; fi
+  write_world_id "$1" "$2"
+}
 
 usage() {
   sed -n '2,30p' "$0"
@@ -75,7 +114,7 @@ case "$CMD" in
     log "lab dir: $LAB_DIR"
     if paper_running; then log "paper: RUNNING (stop it before any swap)"; else log "paper: stopped"; fi
     if [ -d "$SERVER_DIR/world" ]; then
-      log "active world: $SERVER_DIR/world ($(du -sh "$SERVER_DIR/world" 2>/dev/null | cut -f1))"
+      log "active world: $SERVER_DIR/world ($(du -sh "$SERVER_DIR/world" 2>/dev/null | cut -f1)) id=$(read_world_id "$SERVER_DIR/world" || true)${SEED:+ seed=$SEED}"
     else
       log "active world: MISSING ($SERVER_DIR/world)"
     fi
@@ -106,6 +145,8 @@ case "$CMD" in
       fi
       mkdir -p "$SERVER_DIR/world"
       log "created empty world dir (Paper generates on next start)"
+      FRESH_ID="$(write_world_id "$SERVER_DIR/world" "$SEED")"
+      log "minted world-instance id=$FRESH_ID (new instance even for repeated seeds)"
       if [ -n "$SEED" ]; then
         if grep -q '^level-seed=' "$SERVER_DIR/server.properties" 2>/dev/null; then
           sed -i "s/^level-seed=.*/level-seed=$SEED/" "$SERVER_DIR/server.properties"
@@ -125,10 +166,19 @@ case "$CMD" in
       fi
       log "activating snapshot $NAME -> world/"
       cp -r "$SNAP_DIR/$NAME" "$SERVER_DIR/world"
+      RESTORED_ID="$(ensure_world_id "$SERVER_DIR/world" "")"
+      log "world-instance id=$RESTORED_ID (travels with the snapshot)"
       log "done. Start Paper."
     fi
     ;;
+  id|ensure-id)
+    # Print (and assign if missing) the active world's instance identity.
+    # Safe on a running server: only a tiny dotfile is written.
+    if [ ! -d "$SERVER_DIR/world" ]; then die "no active world dir"; fi
+    ID_OUT="$(ensure_world_id "$SERVER_DIR/world" "")"
+    log "active world-instance id=$ID_OUT"
+    ;;
   *)
-    die "unknown command: $CMD (status|prepare|restore)"
+    die "unknown command: $CMD (status|prepare|restore|id)"
     ;;
 esac

@@ -18,6 +18,7 @@ const HOST = process.env.MC_HOST || arg('--host', '127.0.0.1');
 const PORT = parseInt(process.env.MC_PORT || arg('--port', '25565'), 10);
 const USER = arg('--user', 'StationBench01');
 const VERSION = process.env.MC_VERSION || '1.21.11';
+const AWAY_DIR = arg('--dir', 'east');
 
 const bot = mineflayer.createBot({ host: HOST, port: PORT, username: USER, version: VERSION });
 try { bot.loadPlugin(require('mineflayer-pathfinder').pathfinder); } catch {}
@@ -65,7 +66,7 @@ bot.once('spawn', async () => {
     } catch {}
     console.log(JSON.stringify({ anchored: true }));
     // 2. Leave ~40m via generic explore (east).
-    const away = await executePrimitive(bot, { primitive: 'explore', args: { distance: 40, direction: 'east' } }, { timeoutMs: 120000 });
+    const away = await executePrimitive(bot, { primitive: 'explore', args: { distance: 40, direction: AWAY_DIR } }, { timeoutMs: 120000 });
     console.log(JSON.stringify({ left: { ok: away.ok, moved: away.distanceMoved } }));
     // 3. Return via remembered name (no coordinates from us).
     const back = await executePrimitive(bot, { primitive: 'move_to_known_location', args: { name: 'crafting_station', range: 4 } }, { timeoutMs: 120000 });
@@ -81,7 +82,7 @@ bot.once('spawn', async () => {
     out.crafted = !!(craft && craft.ok && countItem('wooden_pickaxe') > before);
     // 5. Stale: break our own table, walk off, return, expect healing.
     const mine = await executePrimitive(bot, { primitive: 'mine_block', args: { x: place.position.x, y: place.position.y, z: place.position.z } }, { timeoutMs: 60000 });
-    console.log(JSON.stringify({ removedTable: !!mine }));
+    console.log(JSON.stringify({ removedTable: !!(mine && mine.ok), removeDetail: mine }));
     await executePrimitive(bot, { primitive: 'explore', args: { distance: 24, direction: 'west' } }, { timeoutMs: 120000 });
     const back2 = await executePrimitive(bot, { primitive: 'move_to_known_location', args: { name: 'crafting_station', range: 4 } }, { timeoutMs: 120000 });
     console.log(JSON.stringify({ returnStale: back2 }));

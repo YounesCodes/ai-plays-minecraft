@@ -17,6 +17,7 @@ const { buildContext } = require('./context');
 const { categorizePlannerError } = require('./cognition');
 const { createActionHistory } = require('./actionHistory');
 const { createCurriculumManager } = require('../curriculum/manager');
+const { getCurriculumTactic } = require('../curriculum/tactics');
 const targetFailures = require('../navigation/targetFailures');
 const explorationState = require('../navigation/exploration');
 const { FOOD_PRIORITY } = require('../primitives/survival');
@@ -218,6 +219,16 @@ async function runAutonomousLoop(bot, options = {}) {
     const maxPlannerFailures = limits.maxConsecutivePlannerFailures;
     const backoffBase = limits.plannerBackoffBaseMs;
 
+    // Chunk settle: the first perception happens immediately after spawn,
+    // when surrounding chunks usually have not streamed in yet. An empty
+    // first scan misleads step-1 cognition ("no wood observed" in a forest).
+    // One bounded pause; all later ticks re-observe normally.
+    try {
+      await sleep(8000);
+    } catch {
+      // ignore
+    }
+
     const goalManager = createGoalManager({ directive });
     // Stone-age curriculum owns the normal strategic goal (no hard-coded
     // startup goal): the first curriculum tick below sets it from actual
@@ -229,6 +240,9 @@ async function runAutonomousLoop(bot, options = {}) {
     // but repeatedly deferred. Observation only — never auto-executes.
     let readinessDrift = { milestoneId: null, count: 0 };
     let lastTickStatus = null;
+    // Bounded tactic-failure guard (§16): same tactic failing repeatedly is
+    // suppressed so cognition takes over. Reset on success or change.
+    const tacticGuard = { sig: null, fails: 0, milestoneId: null };
     // Description last written BY curriculum sync. A model goalChange to
     // something else is a genuine strategic override and sticks: sync only
     // creates the initial goal or advances its own previous goal, never
@@ -419,6 +433,7 @@ async function runAutonomousLoop(bot, options = {}) {
             mcVersion: (bot && bot.version) || process.env.MC_VERSION || '1.21.11',
             worldLocations: listWorldLocations(worldMemory),
             botPosition: posOf(perception),
+            dimension: targetFailures.botDimension(bot),
           });
           try {
             lastTickStatus = tickState.activeMilestone && tickState.activeMilestone.status
@@ -505,8 +520,39 @@ async function runAutonomousLoop(bot, options = {}) {
         pushEvent({ type: 'oscillation', step });
       }
 
+      // Deterministic curriculum tactic (§14): mechanically obvious craft /
+      // place / return actions run WITHOUT an LLM call. Suppressed after
+      // repeated failures of the same tactic (bounded guard) so control
+      // returns to cognition instead of looping.
+      let tactic = null;
+      try {
+        const activeId = curriculumView.activeMilestone ? curriculumView.activeMilestone.id : null;
+        if (activeId && tacticGuard.milestoneId && tacticGuard.milestoneId !== activeId) {
+          tacticGuard.sig = null;
+          tacticGuard.fails = 0;
+          tacticGuard.milestoneId = null;
+        }
+        if (activeId && !(topInterrupt && isUrgent(topInterrupt))) {
+          if (!tacticSuppressed(tacticGuard, activeId)) {
+            const found = getCurriculumTactic({
+              status: lastTickStatus && lastTickStatus.id === activeId ? lastTickStatus.status : null,
+              milestoneId: activeId,
+              inventory: (perception && perception.inventory) || {},
+              emergency: false,
+              tableNearby: tableNearbyNow(perception),
+            });
+            if (found) tactic = { milestone: activeId, ...found };
+          }
+        }
+      } catch {
+        tactic = null;
+      }
+
       let decision = null;
-      {
+      let tacticPending = null;
+      if (tactic) {
+        tacticPending = tactic;
+      } else {
         const context = buildContext({
           directive,
           goalState: goalManager.getState(),
@@ -579,8 +625,9 @@ async function runAutonomousLoop(bot, options = {}) {
         }
       }
 
-      // 6. The one meaningful step from the fresh decision.
-      const nextStep = decision.nextStep;
+      // 6. The one meaningful step: deterministic tactic wins over a
+      // planner call when one fired (no LLM spent on trivial mechanics).
+      const nextStep = tacticPending ? tacticPending.step : decision.nextStep;
 
       // 7. Execute with validation inside executeNextStep.
       const stateBefore = summarizeForReflection(perception);
@@ -606,7 +653,25 @@ async function runAutonomousLoop(bot, options = {}) {
         metrics.inc('actionErrors');
       }
       logger.info(`Step ${step} ${nextStep.type}:${nextStep.name} -> ${describeAction(result)}`);
-      decisions.record('step', { step, nextStep, ok: !!result?.ok, error: result?.error || null });
+      decisions.record('step', { step, nextStep, ok: !!result?.ok, error: result?.error || null, tactic: tacticPending ? tacticPending.reason : null });
+      // Tactic telemetry + bounded failure guard (§15/§16): successes and
+      // milestone changes clear the guard; repeated same-tactic failures
+      // suppress it so cognition takes over instead of looping.
+      try {
+        if (tacticPending) {
+          decisions.record('curriculum_tactic', {
+            step,
+            milestone: tacticPending.milestone,
+            tactic: tacticPending.step.name,
+            reason: tacticPending.reason,
+            ok: !!result?.ok,
+            error: result?.error || null,
+          });
+          updateTacticGuard(tacticGuard, tacticPending, result);
+        }
+      } catch {
+        // ignore
+      }
 
 
       // Skill scoring.
@@ -749,6 +814,55 @@ function recentProgress(actionHistory, last = 4) {
   }
 }
 
+// Table within crafting reach right now (perception, not memory).
+function tableNearbyNow(perception) {
+  try {
+    const blocks = (perception && perception.interestingBlocks) || [];
+    return blocks.some((b) => b && b.type === 'crafting_table' && typeof b.distance === 'number' && b.distance <= 6);
+  } catch {
+    return false;
+  }
+}
+
+function tacticSig(tactic) {
+  try {
+    if (!tactic || !tactic.step) return '?';
+    return `${tactic.step.type}:${tactic.step.name}:${JSON.stringify(tactic.step.args || {})}`;
+  } catch {
+    return '?';
+  }
+}
+
+function tacticSuppressed(guard, milestoneId) {
+  try {
+    return !!guard && guard.milestoneId === milestoneId && !!guard.sig && guard.fails >= 2;
+  } catch {
+    return false;
+  }
+}
+
+function updateTacticGuard(guard, tactic, result) {
+  try {
+    if (!guard) return;
+    const sig = tacticSig(tactic);
+    if (result && result.ok === true) {
+      guard.sig = null;
+      guard.fails = 0;
+      guard.milestoneId = tactic.milestone;
+      return;
+    }
+    if (guard.sig === sig && guard.milestoneId === tactic.milestone) {
+      guard.fails += 1;
+    } else {
+      guard.sig = sig;
+      guard.fails = 1;
+      guard.milestoneId = tactic.milestone;
+    }
+  } catch {
+    // ignore
+  }
+}
+
 // Pure sync rule (exported for tests): curriculum creates the initial goal
 // and advances its own previous goal. A differing current goal means the
 // model (or emergency resume) owns it — leave it alone.
@@ -757,11 +871,6 @@ function shouldCurriculumSync(currentGoal, wantMilestone, lastCurriculumGoal) {
   if (!currentGoal) return true;
   return currentGoal.description === lastCurriculumGoal && currentGoal.description !== wantMilestone.description;
 }
-
-// Actions that move TOWARD a ready craft milestone (craft it, place the
-// needed table, or travel to the known station). Anything else while ready
-// is an observed deferral — counted for cognition, never overridden.
-const READY_PROGRESS_ACTIONS = new Set(['craft_item', 'place_block_nearby', 'move_to_known_location']);
 
 function stepName(nextStep) {
   try {
@@ -782,8 +891,24 @@ function updateReadinessDrift({ drift, status, nextStep, emergency }) {
   if (emergency || !id || !ready || (base.milestoneId && base.milestoneId !== id)) {
     return { milestoneId: ready && !emergency ? id : base.milestoneId, count: 0 };
   }
+  // Relevant progress only (§17): an arbitrary craft/place/return is still
+  // a deferral. Craft counts for the milestone's exact craftAs target or a
+  // listed craftableMissing prerequisite; placement counts for a table when
+  // one is required; station returns count for the known required station.
+  const st = status.status || {};
+  const args = (nextStep && typeof nextStep.args === 'object' && nextStep.args) || {};
   const name = nextStep && typeof nextStep.name === 'string' ? nextStep.name : '';
-  if (READY_PROGRESS_ACTIONS.has(name)) {
+  let relevant = false;
+  if (name === 'craft_item' && typeof args.item === 'string') {
+    // Exact target (drift only counts while materialsReady, so the
+    // prerequisite case is handled by the not-ready reset above).
+    relevant = args.item === st.craftAs;
+  } else if (name === 'place_block_nearby') {
+    relevant = st.requiresTable === true && args.item === 'crafting_table';
+  } else if (name === 'move_to_known_location') {
+    relevant = !!(st.knownStation && typeof st.knownStation.name === 'string' && args.name === st.knownStation.name);
+  }
+  if (relevant) {
     return { milestoneId: id, count: 0 };
   }
   const count = (base.milestoneId === id ? base.count : 0) + 1;
@@ -1151,4 +1276,4 @@ async function tryReflect({ event, goal, stateBefore, attempted, result, stateAf
   }
 }
 
-module.exports = { runAgentLoop, runBenchmarkLoop, runAutonomousLoop, safeFallback, shouldCurriculumSync, anchorWorkstationFromResult, updateReadinessDrift, driftForContext };
+module.exports = { runAgentLoop, runBenchmarkLoop, runAutonomousLoop, safeFallback, shouldCurriculumSync, anchorWorkstationFromResult, updateReadinessDrift, driftForContext, tacticSuppressed, updateTacticGuard, tableNearbyNow };

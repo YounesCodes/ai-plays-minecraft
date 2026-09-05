@@ -24,7 +24,16 @@ function hasCount(inventory, name, n) {
   }
 }
 
-function nearestWorkstation(worldLocations, me) {
+// Dimension normalization: bot/game reports 'minecraft:overworld' while
+// stored entries may say 'overworld'. Compare the suffix form so a Nether
+// workstation can never look like a viable Overworld option.
+function normDimension(d) {
+  const s = typeof d === 'string' ? d : '';
+  return s.startsWith('minecraft:') ? s.slice('minecraft:'.length) : s;
+}
+
+function nearestWorkstation(worldLocations, me, dimension) {
+  const want = normDimension(dimension || 'overworld');
   try {
     let best = null;
     for (const loc of worldLocations || []) {
@@ -33,6 +42,8 @@ function nearestWorkstation(worldLocations, me) {
       const info = loc.metadata && typeof loc.metadata === 'object' ? loc.metadata : {};
       if (info.kind !== 'workstation') continue;
       if (!lp || !Number.isFinite(lp.x)) continue;
+      // A workstation in another dimension is never a viable option here.
+      if (loc.dimension && normDimension(loc.dimension) !== want) continue;
       let d = null;
       if (me && Number.isFinite(me.x) && Number.isFinite(me.z)) {
         const dx = lp.x - me.x;
@@ -103,7 +114,7 @@ function recipeStatus(milestoneId, state) {
     materialsReady,
     requiresTable: hint.requiresTable === true,
     tableNearby,
-    knownStation: nearestWorkstation(state.worldLocations, state.botPosition),
+    knownStation: nearestWorkstation(state.worldLocations, state.botPosition, state.dimension),
     craftableMissing,
   };
 }

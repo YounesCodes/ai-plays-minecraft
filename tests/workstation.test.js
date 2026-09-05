@@ -235,7 +235,7 @@ test('craftableMissing finds one-level intermediates from real data', () => {
 
 test('deferral counter: triggers on repeated non-progress, resets properly', () => {
   const { updateReadinessDrift, driftForContext } = require('../src/agent/loop');
-  const status = { id: 'craft_wooden_pickaxe', status: { materialsReady: true, requiresTable: true } };
+  const status = { id: 'craft_wooden_pickaxe', status: { materialsReady: true, requiresTable: true, craftAs: 'wooden_pickaxe', craftableMissing: [] } };
   let d = { milestoneId: null, count: 0 };
   d = updateReadinessDrift({ drift: d, status, nextStep: { type: 'primitive', name: 'mine_block_type', args: {} }, emergency: false });
   assert.strictEqual(d.count, 1);
@@ -244,8 +244,8 @@ test('deferral counter: triggers on repeated non-progress, resets properly', () 
   assert.strictEqual(d.count, 2);
   assert.strictEqual(driftForContext(d).detected, true);
   assert.strictEqual(driftForContext(d).milestone, 'craft_wooden_pickaxe');
-  // Crafting resets.
-  d = updateReadinessDrift({ drift: d, status, nextStep: { type: 'primitive', name: 'craft_item', args: {} }, emergency: false });
+  // Relevant crafting resets.
+  d = updateReadinessDrift({ drift: d, status, nextStep: { type: 'primitive', name: 'craft_item', args: { item: 'wooden_pickaxe' } }, emergency: false });
   assert.strictEqual(d.count, 0);
   // Emergency resets/ignores.
   d = updateReadinessDrift({ drift: { milestoneId: 'craft_wooden_pickaxe', count: 2 }, status, nextStep: { type: 'primitive', name: 'explore', args: {} }, emergency: true });
@@ -257,4 +257,28 @@ test('deferral counter: triggers on repeated non-progress, resets properly', () 
   assert.strictEqual(d.milestoneId, 'obtain_cobblestone');
   d = updateReadinessDrift({ drift: d, status: other, nextStep: { type: 'primitive', name: 'explore', args: {} }, emergency: false });
   assert.strictEqual(d.count, 1);
+});
+
+test('irrelevant craft/place/return do NOT reset drift', () => {
+  const { updateReadinessDrift } = require('../src/agent/loop');
+  const status = { id: 'craft_wooden_pickaxe', status: { materialsReady: true, requiresTable: true, craftAs: 'wooden_pickaxe', craftableMissing: [] } };
+  const d0 = { milestoneId: 'craft_wooden_pickaxe', count: 1 };
+  // Wrong item, wrong table need, wrong station: all still deferrals.
+  let d = updateReadinessDrift({ drift: d0, status, nextStep: { type: 'primitive', name: 'craft_item', args: { item: 'torch' } }, emergency: false });
+  assert.strictEqual(d.count, 2);
+  d = updateReadinessDrift({ drift: d0, status: { ...status, status: { ...status.status, requiresTable: false } }, nextStep: { type: 'primitive', name: 'place_block_nearby', args: { item: 'dirt' } }, emergency: false });
+  assert.strictEqual(d.count, 2);
+  d = updateReadinessDrift({ drift: d0, status: { ...status, status: { ...status.status, knownStation: { name: 'other_base', distance: 5 } } }, nextStep: { type: 'primitive', name: 'move_to_known_location', args: { name: 'crafting_station' } }, emergency: false });
+  assert.strictEqual(d.count, 2);
+});
+
+test('relevant station return and prerequisite craft DO reset drift', () => {
+  const { updateReadinessDrift } = require('../src/agent/loop');
+  const d0 = { milestoneId: 'craft_wooden_pickaxe', count: 2 };
+  const withStation = { id: 'craft_wooden_pickaxe', status: { materialsReady: true, requiresTable: true, craftAs: 'wooden_pickaxe', craftableMissing: [], knownStation: { name: 'crafting_station', distance: 40 } } };
+  let d = updateReadinessDrift({ drift: d0, status: withStation, nextStep: { type: 'primitive', name: 'move_to_known_location', args: { name: 'crafting_station' } }, emergency: false });
+  assert.strictEqual(d.count, 0);
+  const notReady = { id: 'craft_wooden_pickaxe', status: { materialsReady: false, requiresTable: true, craftAs: 'wooden_pickaxe', craftableMissing: [{ item: 'stick', canCraftNow: true }] } };
+  d = updateReadinessDrift({ drift: d0, status: notReady, nextStep: { type: 'primitive', name: 'craft_item', args: { item: 'stick' } }, emergency: false });
+  assert.strictEqual(d.count, 0);
 });

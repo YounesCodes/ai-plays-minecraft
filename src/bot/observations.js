@@ -300,6 +300,7 @@ function summarizeKnownLocations(pos, worldMemory, maxCount = 8) {
         name: entry.name,
         kind: safe(meta.kind),
         block: safe(meta.block),
+        dimension: typeof entry.dimension === 'string' ? entry.dimension.slice(0, 40) : null,
         distance: round1(dist3(lp, pos)),
       });
     }

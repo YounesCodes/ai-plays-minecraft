@@ -4,8 +4,34 @@
 // { name, position:{x,y,z}, dimension, metadata, createdAt, updatedAt }
 
 const { loadArray, saveArray, nowIso } = require('./store');
+const { validId, namespaceFile } = require('../world/instance');
 
-const FILE = 'world';
+const LEGACY_FILE = 'world';
+
+// World-coordinate memory is namespaced by world-instance ID so snapshots
+// and fresh regens (even from the same seed) never share locations.
+// AI_WORLD_ID comes from the launcher (start-agent.sh ensures the sidecar).
+// Unset/invalid -> legacy shared file (backward compatible, documented).
+// The legacy file is NEVER auto-imported into a namespace.
+function activeFile() {
+  try {
+    const id = process.env.AI_WORLD_ID;
+    if (id && validId(id)) return namespaceFile(id);
+  } catch {
+    // ignore
+  }
+  return LEGACY_FILE;
+}
+
+function namespace() {
+  try {
+    const id = process.env.AI_WORLD_ID;
+    if (id && validId(id)) return { id, file: namespaceFile(id), legacy: false };
+  } catch {
+    // ignore
+  }
+  return { id: null, file: LEGACY_FILE, legacy: true };
+}
 
 function maxCount() {
   const v = parseInt(process.env.MAX_WORLD_MEMORIES || '500', 10);
@@ -17,7 +43,7 @@ function validPos(pos) {
 }
 
 function list() {
-  return loadArray(FILE);
+  return loadArray(activeFile());
 }
 
 function listAsMap() {
@@ -43,7 +69,7 @@ function remember(name, pos, metadata = {}, dimension = 'overworld') {
   } catch {
     safeMeta = {};
   }
-  const items = loadArray(FILE);
+  const items = loadArray(activeFile());
   const now = nowIso();
   const clean = name.trim();
   let entry = items.find((e) => e.name === clean);
@@ -65,14 +91,14 @@ function remember(name, pos, metadata = {}, dimension = 'overworld') {
     items.push(entry);
   }
   while (items.length > maxCount()) items.shift();
-  saveArray(FILE, items);
+  saveArray(activeFile(), items);
   return { ok: true, entry };
 }
 
 function forget(name) {
-  const items = loadArray(FILE).filter((e) => e.name !== name);
-  saveArray(FILE, items);
+  const items = loadArray(activeFile()).filter((e) => e.name !== name);
+  saveArray(activeFile(), items);
   return { ok: true };
 }
 
-module.exports = { list, listAsMap, get, remember, forget };
+module.exports = { list, listAsMap, get, remember, forget, namespace, activeFile };
