@@ -61,7 +61,7 @@ setTimeout(() => {
       logsNearby48: logsNearby,
       waterNearby48: waterNearby,
       logBlocks: logsNearby > 0,
-      drySpawn: (categories.water || 0) <= 2 && waterNearby48 < 40,
+      drySpawn: (categories.water || 0) <= 2 && waterNearby < 40,
     });
   } catch (err) {
     finish({ probe: 'spawn', error: String((err && err.message) || err).slice(0, 200) });
