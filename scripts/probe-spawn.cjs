@@ -58,8 +58,8 @@ setTimeout(() => {
       position: p.position || null,
       categories,
       waterBlocksInPerception: categories.water || 0,
-      logsNearby48,
-      waterNearby48,
+      logsNearby48: logsNearby,
+      waterNearby48: waterNearby,
       logBlocks: logsNearby > 0,
       drySpawn: (categories.water || 0) <= 2 && waterNearby48 < 40,
     });
