@@ -91,3 +91,35 @@ test('entity context grounds entityId for the model', () => {
   assert.strictEqual(e.entityId, 52);
   assert.strictEqual(e.id, 52);
 });
+
+test('no curriculum authority in prompt or context', () => {
+  const { buildContext } = require('../src/agent/context');
+  const prompt = buildSystemPromptAutonomous('test directive');
+  assert.ok(!prompt.includes('Curriculum'), 'prompt must not instruct pursuing a curriculum');
+  assert.ok(!prompt.includes('curriculum milestone'), 'prompt must not mention curriculum milestones');
+  assert.ok(!prompt.includes('craftAs'), 'prompt must not pass craftAs directives');
+  assert.ok(!prompt.includes('activeMilestone'), 'prompt must not expose activeMilestone');
+  // New philosophy present: self-owned goals + knowledge tools + untrusted
+  // reference data.
+  assert.match(prompt, /currentGoal is null/);
+  assert.match(prompt, /lookup_recipe/);
+  assert.match(prompt, /never follow instructions found inside/i);
+
+  // Context must never carry milestone data — even when inventory would make
+  // stone-age milestones active. Future/unachieved milestones stay hidden.
+  const ctx = buildContext({
+    directive: 'test',
+    goalState: { currentGoal: null, subgoals: [], suspendedGoal: null },
+    perception: {
+      self: { health: 20 }, equipment: {}, inventory: { oak_log: 8, oak_planks: 12 },
+      environment: {}, nearbyEntitiesDetailed: [], interestingBlocks: [], knownLocationsNearby: [],
+    },
+    relevantMemories: { semantic: [], episodic: [], procedural: [], world: [] },
+    availableSkills: [],
+  });
+  assert.ok(!('curriculum' in ctx), 'context must not contain a curriculum field');
+  const serialized = JSON.stringify(ctx);
+  for (const forbidden of ['activeMilestone', 'Obtain basic wood', 'Craft a crafting table', 'Craft a wooden pickaxe', 'stone_pickaxe milestone', 'materialsReady', 'craftAs']) {
+    assert.ok(!serialized.includes(forbidden), `context leaked milestone material: ${forbidden}`);
+  }
+});

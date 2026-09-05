@@ -7,7 +7,6 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { createCurriculumManager } = require('../src/curriculum/manager');
 const { isComplete, isLog, isPlanks } = require('../src/curriculum/evaluator');
-const { shouldCurriculumSync } = require('../src/agent/loop');
 
 function state(inv = {}, nearby = [], session = {}) {
   return { inventory: inv, nearbyBlocks: nearby, session };
@@ -141,22 +140,16 @@ test('outcome flags feed session (craft + place table)', () => {
   assert.strictEqual(c.noteOutcome({ ok: true, primitive: 'mine_block_type' }), null);
 });
 
-test('sync rule: create, advance own goal, never stomp model goals', () => {
-  const want = (d) => ({ description: d });
-  assert.strictEqual(shouldCurriculumSync(null, want('Obtain wood'), null), true);
-  assert.strictEqual(shouldCurriculumSync({ description: 'Obtain wood' }, want('Craft planks'), 'Obtain wood'), true);
-  assert.strictEqual(shouldCurriculumSync({ description: 'Model strategy' }, want('Craft planks'), 'Obtain wood'), false);
-  assert.strictEqual(shouldCurriculumSync({ description: 'Obtain wood' }, want('Obtain wood'), 'Obtain wood'), false);
-  assert.strictEqual(shouldCurriculumSync({ description: 'Escape!' }, null, 'Obtain wood'), false);
-});
-
-test('emergency resume restores, curriculum re-syncs stale goals', () => {
-  // Resumed pre-emergency description differs from the now-active
-  // milestone but matches the last curriculum write -> advance allowed.
-  assert.strictEqual(
-    shouldCurriculumSync({ description: 'Obtain basic wood (logs)' }, { description: 'Craft wooden planks' }, 'Obtain basic wood (logs)'),
-    true
-  );
+test('curriculum evaluator has no goal authority in default autonomous mode', () => {
+  // The curriculum module was demoted to a silent progression observer: it
+  // exposes no goal-setting API at all, and the loop no longer syncs
+  // curriculum milestones into the goal manager.
+  const c = createCurriculumManager();
+  for (const key of Object.keys(c)) {
+    assert.ok(!/setGoal|advance|selectGoal/i.test(key), `manager must not expose goal authority API: ${key}`);
+  }
+  const loop = require('../src/agent/loop');
+  assert.strictEqual(loop.shouldCurriculumSync, undefined, 'curriculum goal sync must be gone from the loop');
 });
 
 // --- place_block_nearby body tests (mock bot, no Minecraft) ---

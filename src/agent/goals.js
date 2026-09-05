@@ -4,7 +4,7 @@
 
 const { nowIso } = require('../memory/store');
 
-const DEFAULT_DIRECTIVE = 'Survive and progress through Minecraft autonomously. Maintain health and food, explore, acquire resources, improve equipment, establish useful shelter and storage, learn from experience, and pursue increasingly advanced Minecraft progression while avoiding unnecessary death.';
+const DEFAULT_DIRECTIVE = 'Survive, learn, explore and progress through Minecraft autonomously. Decide your own goals from what you observe, what you know and what you have learned from experience. Avoid unnecessary death.';
 
 function createGoalManager(options = {}) {
   const primaryDirective = options.directive || process.env.AGENT_DIRECTIVE || DEFAULT_DIRECTIVE;

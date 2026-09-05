@@ -34,7 +34,10 @@ function contextFor({ inventory, nearbyBlocks, worldLocations, botPos, lastResul
   const { buildContext } = require('../src/agent/context');
   const c = createCurriculumManager();
   const tick = c.tick({ inventory, nearbyBlocks, session: {}, mcVersion: '1.21.11', worldLocations, botPosition: botPos });
-  return buildContext({
+  // Guided-mode diagnostic tooling: this script intentionally injects
+  // milestone context into the planner context. Default autonomous operation
+  // does NOT do this (buildContext no longer carries curriculum state).
+  const context = buildContext({
     directive: 'Survive and progress.',
     goalState: { currentGoal: { description: tick.activeMilestone ? tick.activeMilestone.description : 'done' }, subgoals: [], suspendedGoal: null },
     perception: basePerception({ inventory, interestingBlocks: nearbyBlocks }),
@@ -47,8 +50,9 @@ function contextFor({ inventory, nearbyBlocks, worldLocations, botPos, lastResul
     actionHistory: [],
     stagnation: { detected: false },
     oscillation: { detected: false },
-    curriculum: { activeMilestone: tick.activeMilestone, completedMilestones: tick.completedMilestones },
   });
+  context.curriculum = { activeMilestone: tick.activeMilestone, completedMilestones: tick.completedMilestones };
+  return context;
 }
 
 // Rubrics: does the decision move toward the milestone?

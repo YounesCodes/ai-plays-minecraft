@@ -16,8 +16,10 @@ const { createGoalManager } = require('./goals');
 const { buildContext } = require('./context');
 const { categorizePlannerError } = require('./cognition');
 const { createActionHistory } = require('./actionHistory');
+// Silent progression observer: the curriculum module is repurposed as a
+// hidden evaluator. It records achieved milestones as telemetry and NEVER
+// sets goals, preempts cognition, or instructs the model.
 const { createCurriculumManager } = require('../curriculum/manager');
-const { getCurriculumTactic } = require('../curriculum/tactics');
 const targetFailures = require('../navigation/targetFailures');
 const explorationState = require('../navigation/exploration');
 const { FOOD_PRIORITY } = require('../primitives/survival');
@@ -230,24 +232,13 @@ async function runAutonomousLoop(bot, options = {}) {
     }
 
     const goalManager = createGoalManager({ directive });
-    // Stone-age curriculum owns the normal strategic goal (no hard-coded
-    // startup goal): the first curriculum tick below sets it from actual
-    // inventory/world state, so resumed runs skip satisfied milestones.
+    // Self-directed startup: currentGoal starts null. The LLM chooses its own
+    // first goal from the directive + observation. The curriculum manager is
+    // repurposed as a silent progression observer (telemetry only).
     const curriculum = createCurriculumManager();
     const curriculumSession = {};
-    let curriculumStarted = false;
-    // Readiness-drift tracking (§11): craft milestone with materials ready
-    // but repeatedly deferred. Observation only — never auto-executes.
-    let readinessDrift = { milestoneId: null, count: 0 };
-    let lastTickStatus = null;
-    // Bounded tactic-failure guard (§16): same tactic failing repeatedly is
-    // suppressed so cognition takes over. Reset on success or change.
-    const tacticGuard = { sig: null, fails: 0, milestoneId: null };
-    // Description last written BY curriculum sync. A model goalChange to
-    // something else is a genuine strategic override and sticks: sync only
-    // creates the initial goal or advances its own previous goal, never
-    // stomps a model decision the very next tick.
-    let lastCurriculumGoal = null;
+    let observerStarted = false;
+    const startedAt = Date.now();
 
     const cache = createPerceptionCache();
     const worldMemory = memoryEnabled() ? require('../memory/world') : null;
@@ -413,10 +404,11 @@ async function runAutonomousLoop(bot, options = {}) {
         calmStreak = 0;
       }
 
-      // 2b. Curriculum tick (deterministic progression). Skipped while an
-      // emergency goal is active — suspension/resume keep working, and the
-      // next calm tick re-syncs any stale resumed description.
-      let curriculumView = { activeMilestone: null, completedMilestones: [], drift: { detected: false } };
+      // 2b. Silent progression observer (evaluation only). Deterministic
+      // milestone predicates record what the agent has achieved; the tick
+      // output never reaches cognition and never touches the goal manager.
+      // Skipped while an emergency goal is active (suspension/resume
+      // unaffected).
       try {
         const gsNow = goalManager.getState();
         if (!gsNow.currentGoal?.emergency) {
@@ -435,39 +427,27 @@ async function runAutonomousLoop(bot, options = {}) {
             botPosition: posOf(perception),
             dimension: targetFailures.botDimension(bot),
           });
-          try {
-            lastTickStatus = tickState.activeMilestone && tickState.activeMilestone.status
-              ? { id: tickState.activeMilestone.id, status: tickState.activeMilestone.status }
-              : null;
-          } catch {
-            lastTickStatus = null;
-          }
-          curriculumView = { activeMilestone: tickState.activeMilestone, completedMilestones: tickState.completedMilestones, drift: driftForContext(readinessDrift) };
-          if (!curriculumStarted) {
-            curriculumStarted = true;
-            decisions.record('curriculum_started', { step, active: tickState.activeMilestone ? tickState.activeMilestone.id : null, completed: tickState.completedMilestones });
-          }
-          for (const id of tickState.newlySkipped || []) {
-            decisions.record('milestone_skipped_already_satisfied', { step, milestone: id });
+          if (!observerStarted) {
+            observerStarted = true;
+            decisions.record('progression_observer_started', { step });
           }
           for (const id of tickState.newlyCompleted || []) {
-            decisions.record('milestone_completed', { step, milestone: id, inventory: summarizeInventoryCounts(perception) });
+            decisions.record('progress_achievement', {
+              id,
+              step,
+              elapsedMs: Date.now() - startedAt,
+              inventory: summarizeInventoryCounts(perception),
+            });
           }
-          if (tickState.activeMilestone && tickState.activeChanged) {
-            decisions.record('milestone_selected', { step, milestone: tickState.activeMilestone.id, reason: tickState.activeMilestone.reason });
-          }
-          const want = tickState.activeMilestone;
-          const have = gsNow.currentGoal;
-          if (want && shouldCurriculumSync(have, want, lastCurriculumGoal)) {
-            const prev = have?.description || null;
-            goalManager.setGoal(want.description, { priority: 70, reason: `Curriculum milestone: ${want.id}`, subgoals: [] });
-            metrics.inc('goalChanges');
-            decisions.record('goal_changed', { from: prev, to: want.description, reason: `curriculum:${want.id}`, step });
-            lastCurriculumGoal = want.description;
+          // Milestones already satisfied at first observation (resumed runs,
+          // pre-existing state): recorded as pre-existing, never as an
+          // in-run achievement.
+          for (const id of tickState.newlySkipped || []) {
+            decisions.record('progress_preexisting', { id, step });
           }
         }
       } catch {
-        // curriculum must never break the loop
+        // evaluation must never break the loop
       }
 
       // 3. Memory retrieval (bounded, deterministic).
@@ -485,13 +465,13 @@ async function runAutonomousLoop(bot, options = {}) {
         relevant = { semantic: [], episodic: [], procedural: [], world: [] };
       }
 
-      // 4-5. Fresh cognition every tick. executeNextStep() below awaits the
+      // 4-6. Fresh cognition every tick. executeNextStep() below awaits the
       // whole primitive/skill, so when it returns there is NO in-progress
       // action to "continue" — replaying the last decision would re-run a
       // completed action blindly (the old 4x move_near bug). Each completed
       // step produces new information, so the next action always comes from
-      // a fresh decision. (needsPlanner gating belonged to the removed
-      // multi-step plan architecture; autonomous-v2 plans per action.)
+      // a fresh decision. No deterministic tactic preempts the planner in
+      // autonomous mode: strategy belongs to the LLM.
       const significantEvent = inferSignificantEvent(lastResult, perception, seenValuables, milestoneItems);
       if (significantEvent) pushEvent({ type: significantEvent.type, step });
 
@@ -520,114 +500,56 @@ async function runAutonomousLoop(bot, options = {}) {
         pushEvent({ type: 'oscillation', step });
       }
 
-      // Deterministic curriculum tactic (§14): mechanically obvious craft /
-      // place / return actions run WITHOUT an LLM call. Suppressed after
-      // repeated failures of the same tactic (bounded guard) so control
-      // returns to cognition instead of looping.
-      let tactic = null;
-      try {
-        const activeId = curriculumView.activeMilestone ? curriculumView.activeMilestone.id : null;
-        if (activeId && tacticGuard.milestoneId && tacticGuard.milestoneId !== activeId) {
-          tacticGuard.sig = null;
-          tacticGuard.fails = 0;
-          tacticGuard.milestoneId = null;
-        }
-        if (activeId && !(topInterrupt && isUrgent(topInterrupt))) {
-          if (!tacticSuppressed(tacticGuard, activeId)) {
-            const found = getCurriculumTactic({
-              status: lastTickStatus && lastTickStatus.id === activeId ? lastTickStatus.status : null,
-              milestoneId: activeId,
-              inventory: (perception && perception.inventory) || {},
-              emergency: false,
-              tableNearby: tableNearbyNow(perception),
-            });
-            if (found) tactic = { milestone: activeId, ...found };
-          }
-        }
-      } catch {
-        tactic = null;
-      }
-
+      const context = buildContext({
+        directive,
+        goalState: goalManager.getState(),
+        perception,
+        lastResult,
+        recentEvents,
+        relevantMemories: relevant,
+        availableSkills: rankRelevantSkills(knownSkills, relevant),
+        exploration: explorationSummary(perception, resourceFailStreak),
+        deathSignal: deathSignalFor(recentDeaths),
+        actionHistory: actionHistory.summary(),
+        stagnation,
+        oscillation,
+      });
       let decision = null;
-      let tacticPending = null;
-      if (tactic) {
-        tacticPending = tactic;
-      } else {
-        const context = buildContext({
-          directive,
-          goalState: goalManager.getState(),
-          perception,
-          lastResult,
-          recentEvents,
-          relevantMemories: relevant,
-          availableSkills: rankRelevantSkills(knownSkills, relevant),
-          exploration: explorationSummary(perception, resourceFailStreak),
-          deathSignal: deathSignalFor(recentDeaths),
-          actionHistory: actionHistory.summary(),
-          stagnation,
-          oscillation,
-          curriculum: curriculumView,
+      try {
+        const { decision: validated } = await planAutonomous({ context, knownSkillNames });
+        decision = validated;
+        consecutivePlannerFailures = 0;
+        applyGoalChange({ validated, goalManager, step });
+        decisions.record('decision', {
+          step,
+          contract: 'autonomous-v2',
+          assessment: validated.assessment?.slice(0, 300),
+          goalChange: validated.goalChange?.description || null,
+          nextStep: validated.nextStep,
         });
-        try {
-          const { decision: validated } = await planAutonomous({ context, knownSkillNames });
-          decision = validated;
+      } catch (err) {
+        consecutivePlannerFailures += 1;
+        metrics.inc('llmErrors');
+        logger.error(`Step ${step}: autonomous planner failed (${consecutivePlannerFailures}/${maxPlannerFailures}): ${err?.message || err}`);
+        decisions.record('planner_failed', { step, contract: 'autonomous-v2', error: String(err?.message || err).slice(0, 300), consecutive: consecutivePlannerFailures, category: categorizePlannerError(err), model: process.env.OPENROUTER_MODEL || null });
+        if (consecutivePlannerFailures >= maxPlannerFailures) {
+          logger.warn(`Circuit breaker: pausing planning after ${consecutivePlannerFailures} consecutive failures.`);
+          decisions.record('circuit_breaker', { step, consecutive: consecutivePlannerFailures });
+          await sleep(Math.min(60000, backoffBase * 4));
           consecutivePlannerFailures = 0;
-          applyGoalChange({ validated, goalManager, step });
-          decisions.record('decision', {
-            step,
-            contract: 'autonomous-v2',
-            assessment: validated.assessment?.slice(0, 300),
-            goalChange: validated.goalChange?.description || null,
-            nextStep: validated.nextStep,
-          });
-          // Readiness-drift observation (§10/§11): craft milestone ready
-          // but the fresh decision goes elsewhere. Counted, never overridden.
-          try {
-            readinessDrift = updateReadinessDrift({
-              drift: readinessDrift,
-              status: lastTickStatus,
-              nextStep: validated.nextStep,
-              emergency: !!(topInterrupt && isUrgent(topInterrupt)),
-            });
-            if (readinessDrift.deferred) {
-              const st = readinessDrift.status;
-              decisions.record('curriculum_missed_ready_action', {
-                step,
-                milestone: readinessDrift.milestoneId,
-                selectedAction: stepName(validated.nextStep),
-                materialsReady: !!(st && st.materialsReady),
-                requiresTable: !!(st && st.requiresTable),
-                tableNearby: st ? st.tableNearby : null,
-                knownStationDistance: st && st.knownStation ? st.knownStation.distance : null,
-              });
-            }
-          } catch {
-            // telemetry must never break cognition
-          }
-        } catch (err) {
-          consecutivePlannerFailures += 1;
-          metrics.inc('llmErrors');
-          logger.error(`Step ${step}: autonomous planner failed (${consecutivePlannerFailures}/${maxPlannerFailures}): ${err?.message || err}`);
-          decisions.record('planner_failed', { step, contract: 'autonomous-v2', error: String(err?.message || err).slice(0, 300), consecutive: consecutivePlannerFailures, category: categorizePlannerError(err), model: process.env.OPENROUTER_MODEL || null });
-          if (consecutivePlannerFailures >= maxPlannerFailures) {
-            logger.warn(`Circuit breaker: pausing planning after ${consecutivePlannerFailures} consecutive failures.`);
-            decisions.record('circuit_breaker', { step, consecutive: consecutivePlannerFailures });
-            await sleep(Math.min(60000, backoffBase * 4));
-            consecutivePlannerFailures = 0;
-            await sleep(delayMs);
-            continue;
-          }
-          await sleep(Math.min(30000, backoffBase * Math.pow(2, consecutivePlannerFailures - 1)));
-          // Deterministic safe fallback (no LLM): eat if hungry, else wait.
-          lastResult = await safeFallback(bot, perception, topInterrupt);
           await sleep(delayMs);
           continue;
         }
+        await sleep(Math.min(30000, backoffBase * Math.pow(2, consecutivePlannerFailures - 1)));
+        // Deterministic safe fallback (no LLM): eat if hungry, else wait.
+        lastResult = await safeFallback(bot, perception, topInterrupt);
+        await sleep(delayMs);
+        continue;
       }
 
-      // 6. The one meaningful step: deterministic tactic wins over a
-      // planner call when one fired (no LLM spent on trivial mechanics).
-      const nextStep = tacticPending ? tacticPending.step : decision.nextStep;
+      // 6. The one meaningful step: exactly one complete action from a
+      // fresh decision.
+      const nextStep = decision.nextStep;
 
       // 7. Execute with validation inside executeNextStep.
       const stateBefore = summarizeForReflection(perception);
@@ -653,24 +575,17 @@ async function runAutonomousLoop(bot, options = {}) {
         metrics.inc('actionErrors');
       }
       logger.info(`Step ${step} ${nextStep.type}:${nextStep.name} -> ${describeAction(result)}`);
-      decisions.record('step', { step, nextStep, ok: !!result?.ok, error: result?.error || null, tactic: tacticPending ? tacticPending.reason : null });
-      // Tactic telemetry + bounded failure guard (§15/§16): successes and
-      // milestone changes clear the guard; repeated same-tactic failures
-      // suppress it so cognition takes over instead of looping.
+      decisions.record('step', { step, nextStep, ok: !!result?.ok, error: result?.error || null });
+      // Knowledge-primitive telemetry: what the model chose to look up and
+      // whether the lookup succeeded. Informational actions stay visible in
+      // telemetry but never write goals or memories.
       try {
-        if (tacticPending) {
-          decisions.record('curriculum_tactic', {
-            step,
-            milestone: tacticPending.milestone,
-            tactic: tacticPending.step.name,
-            reason: tacticPending.reason,
-            ok: !!result?.ok,
-            error: result?.error || null,
-          });
-          updateTacticGuard(tacticGuard, tacticPending, result);
+        if (nextStep.type === 'primitive' && KNOWLEDGE_PRIMITIVES.has(nextStep.name)) {
+          decisions.record('knowledge_query', { step, kind: nextStep.name, query: nextStep.args || {} });
+          decisions.record('knowledge_query_result', { step, kind: nextStep.name, ok: !!result?.ok, resultCount: knowledgeResultCount(result) });
         }
       } catch {
-        // ignore
+        // telemetry must never break the loop
       }
 
 
@@ -814,125 +729,27 @@ function recentProgress(actionHistory, last = 4) {
   }
 }
 
-// Table within crafting reach right now (perception, not memory).
-function tableNearbyNow(perception) {
-  try {
-    const blocks = (perception && perception.interestingBlocks) || [];
-    return blocks.some((b) => b && b.type === 'crafting_table' && typeof b.distance === 'number' && b.distance <= 6);
-  } catch {
-    return false;
-  }
-}
+// Knowledge primitives are informational actions: they return facts for the
+// next cognition turn and never mutate world, goals, or memory.
+const KNOWLEDGE_PRIMITIVES = new Set([
+  'lookup_recipe',
+  'lookup_uses',
+  'search_game_data',
+  'lookup_item',
+  'lookup_block',
+  'lookup_minecraft_reference',
+]);
 
-function tacticSig(tactic) {
+function knowledgeResultCount(result) {
   try {
-    if (!tactic || !tactic.step) return '?';
-    return `${tactic.step.type}:${tactic.step.name}:${JSON.stringify(tactic.step.args || {})}`;
-  } catch {
-    return '?';
-  }
-}
-
-function tacticSuppressed(guard, milestoneId) {
-  try {
-    return !!guard && guard.milestoneId === milestoneId && !!guard.sig && guard.fails >= 2;
-  } catch {
-    return false;
-  }
-}
-
-function updateTacticGuard(guard, tactic, result) {
-  try {
-    if (!guard) return;
-    const sig = tacticSig(tactic);
-    if (result && result.ok === true) {
-      guard.sig = null;
-      guard.fails = 0;
-      guard.milestoneId = tactic.milestone;
-      return;
+    if (!result || result.ok !== true) return 0;
+    for (const key of ['variants', 'uses', 'matches', 'results']) {
+      if (Array.isArray(result[key])) return result[key].length;
     }
-    if (guard.sig === sig && guard.milestoneId === tactic.milestone) {
-      guard.fails += 1;
-    } else {
-      guard.sig = sig;
-      guard.fails = 1;
-      guard.milestoneId = tactic.milestone;
-    }
+    return 1;
   } catch {
-    // ignore
+    return 0;
   }
-}
-
-// Pure sync rule (exported for tests): curriculum creates the initial goal
-// and advances its own previous goal. A differing current goal means the
-// model (or emergency resume) owns it — leave it alone.
-function shouldCurriculumSync(currentGoal, wantMilestone, lastCurriculumGoal) {
-  if (!wantMilestone) return false;
-  if (!currentGoal) return true;
-  return currentGoal.description === lastCurriculumGoal && currentGoal.description !== wantMilestone.description;
-}
-
-function stepName(nextStep) {
-  try {
-    if (!nextStep || typeof nextStep !== 'object') return '?';
-    return `${nextStep.type === 'skill' ? 'skill' : 'primitive'}:${nextStep.name || '?'}`;
-  } catch {
-    return '?';
-  }
-}
-
-function updateReadinessDrift({ drift, status, nextStep, emergency }) {
-  const base = drift && typeof drift === 'object' ? { ...drift } : { milestoneId: null, count: 0 };
-  delete base.deferred;
-  delete base.status;
-  const id = status && status.id ? status.id : null;
-  const ready = !!(status && status.status && status.status.materialsReady === true);
-  // Reset on milestone change, emergency, non-craft milestones, or progress.
-  if (emergency || !id || !ready || (base.milestoneId && base.milestoneId !== id)) {
-    return { milestoneId: ready && !emergency ? id : base.milestoneId, count: 0 };
-  }
-  // Relevant progress only (§17): an arbitrary craft/place/return is still
-  // a deferral. Craft counts for the milestone's exact craftAs target or a
-  // listed craftableMissing prerequisite; placement counts for a table when
-  // one is required; station returns count for the known required station.
-  const st = status.status || {};
-  const args = (nextStep && typeof nextStep.args === 'object' && nextStep.args) || {};
-  const name = nextStep && typeof nextStep.name === 'string' ? nextStep.name : '';
-  let relevant = false;
-  if (name === 'craft_item' && typeof args.item === 'string') {
-    // Exact target (drift only counts while materialsReady, so the
-    // prerequisite case is handled by the not-ready reset above).
-    relevant = args.item === st.craftAs;
-  } else if (name === 'place_block_nearby') {
-    relevant = st.requiresTable === true && args.item === 'crafting_table';
-  } else if (name === 'move_to_known_location') {
-    relevant = !!(st.knownStation && typeof st.knownStation.name === 'string' && args.name === st.knownStation.name);
-  }
-  if (relevant) {
-    return { milestoneId: id, count: 0 };
-  }
-  const count = (base.milestoneId === id ? base.count : 0) + 1;
-  const out = { milestoneId: id, count };
-  if (count >= 1) {
-    out.deferred = true;
-    out.status = status.status;
-  }
-  return out;
-}
-
-function driftForContext(drift) {
-  try {
-    if (drift && drift.milestoneId && drift.count >= 2) {
-      return {
-        detected: true,
-        milestone: drift.milestoneId,
-        reason: 'materials are ready but crafting has been deferred repeatedly',
-      };
-    }
-  } catch {
-    // ignore
-  }
-  return { detected: false };
 }
 
 function listWorldLocations(worldMemory) {
@@ -1109,6 +926,14 @@ function applyGoalChange({ validated, goalManager, step }) {
   });
   metrics.inc('goalChanges');
   decisions.record('goal_changed', { from: prev, to: incoming.description, reason: incoming.reason, step });
+  // Self-direction telemetry: distinguish the first self-chosen goal from
+  // later revisions (goal-churn measurement).
+  decisions.record(prev === null ? 'self_goal_selected' : 'self_goal_changed', {
+    step,
+    goal: incoming.description,
+    reason: incoming.reason,
+    priority: incoming.priority,
+  });
 }
 
 async function safeFallback(bot, perception, topInterrupt) {
@@ -1249,7 +1074,7 @@ async function tryReflect({ event, goal, stateBefore, attempted, result, stateAf
     logger.info(`Reflection: ${r.summary}`);
 
     // At most one memory per reflection; no goal changes, no skill work.
-    // Goal management belongs to cognition/curriculum.
+    // Goal management belongs to cognition; memories capture experience.
     if (memoryEnabled() && r.memory) {
       try {
         if (r.memory.kind === 'semantic') {
@@ -1276,4 +1101,4 @@ async function tryReflect({ event, goal, stateBefore, attempted, result, stateAf
   }
 }
 
-module.exports = { runAgentLoop, runBenchmarkLoop, runAutonomousLoop, safeFallback, shouldCurriculumSync, anchorWorkstationFromResult, updateReadinessDrift, driftForContext, tacticSuppressed, updateTacticGuard, tableNearbyNow };
+module.exports = { runAgentLoop, runBenchmarkLoop, runAutonomousLoop, safeFallback, anchorWorkstationFromResult };

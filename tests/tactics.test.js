@@ -149,14 +149,11 @@ test('tactic output always passes primitive validation', () => {
   }
 });
 
-test('guard helpers suppress repeats and reset on change', () => {
-  const { tacticSuppressed, updateTacticGuard } = require('../src/agent/loop');
-  const guard = { sig: null, fails: 0, milestoneId: null };
-  const t = { milestone: 'make_planks', step: { type: 'primitive', name: 'craft_item', args: { item: 'oak_planks', count: 1 } }, reason: 'craft-ready' };
-  assert.strictEqual(tacticSuppressed(guard, 'make_planks'), false);
-  updateTacticGuard(guard, t, { ok: false });
-  updateTacticGuard(guard, t, { ok: false });
-  assert.strictEqual(tacticSuppressed(guard, 'make_planks'), true);
-  updateTacticGuard(guard, t, { ok: true });
-  assert.strictEqual(tacticSuppressed(guard, 'make_planks'), false);
+test('tactics are scaffolding only: default autonomous loop does not use them', () => {
+  // The deterministic tactics remain available for benchmark/guided
+  // tooling, but the autonomous loop must not call them by default.
+  const fs = require('fs');
+  const loopSrc = fs.readFileSync(require.resolve('../src/agent/loop'), 'utf8');
+  assert.ok(!loopSrc.includes('curriculum/tactics'), 'autonomous loop must not use deterministic tactics');
+  assert.ok(!loopSrc.includes('getCurriculumTactic'), 'autonomous loop must not call getCurriculumTactic');
 });

@@ -14,6 +14,7 @@ const crafting = require('./crafting');
 const inventory = require('./inventory');
 const interaction = require('./interaction');
 const survival = require('./survival');
+const knowledge = require('./knowledge');
 
 const EXECUTORS = {
   move_near: (bot, args, ctx) => movement.moveNear(bot, args, ctx),
@@ -40,6 +41,12 @@ const EXECUTORS = {
   place_block_nearby: (bot, args, ctx) => interaction.placeBlockNearby(bot, args, ctx),
   use_item: (bot, args) => interaction.useItem(bot, args),
   chat: (bot, args) => interaction.chat(bot, args),
+  lookup_recipe: (bot, args) => knowledge.lookupRecipe(bot, args),
+  lookup_uses: (bot, args) => knowledge.lookupUses(bot, args),
+  search_game_data: (bot, args) => knowledge.searchGameData(bot, args),
+  lookup_item: (bot, args) => knowledge.lookupItem(bot, args),
+  lookup_block: (bot, args) => knowledge.lookupBlock(bot, args),
+  lookup_minecraft_reference: (bot, args) => knowledge.lookupMinecraftReference(bot, args),
 };
 
 const DESCRIPTIONS = {
@@ -67,6 +74,12 @@ const DESCRIPTIONS = {
   place_block_nearby: 'Place an inventory block on a nearby suitable surface the body selects. No coordinates needed. Returns the placed position.',
   use_item: 'Activate (right-click) the held or named item.',
   chat: 'Send a short chat message.',
+  lookup_recipe: 'Look up ALL crafting recipe variants for an item in local game data. Information only — crafts nothing.',
+  lookup_uses: 'Look up craftable outputs that use an item as an ingredient. Information only.',
+  search_game_data: 'Search canonical item/block names in local game data (e.g. "wood pick"). Information only.',
+  lookup_item: 'Look up item facts (stack size, durability, food). Information only.',
+  lookup_block: 'Look up block facts (hardness, tool requirements, drops). Information only.',
+  lookup_minecraft_reference: 'Query the fixed Minecraft wiki reference for game mechanics. Query text only. Information only.',
 };
 
 function getTimeoutMs(ctx, fallback) {

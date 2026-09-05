@@ -124,15 +124,22 @@ test('autonomous loop plans fresh every tick and never replays completed actions
     // call per tick, zero framework-generated repeats.
     assert.strictEqual(plannerCalls, 5);
     assert.deepStrictEqual(executed, [stepA, stepC, stepA, stepC, stepA]);
-    // goalChange:null must NOT replace the curriculum goal; only the
-    // curriculum bootstrap itself may set it once (from null).
+    // goalChange:null must NOT create or replace any goal, and the
+    // curriculum layer must never set one either: with no model goalChange,
+    // zero goal changes happen (goal stays null, self-directed).
     const raw = readDecisions(tmp);
     const changes = raw.filter((d) => d.type === 'goal_changed');
-    assert.strictEqual(changes.length, 1);
-    assert.match(changes[0].reason || '', /^curriculum:/);
+    assert.strictEqual(changes.length, 0);
+    assert.strictEqual(raw.filter((d) => d.type === 'self_goal_selected').length, 0);
     const types = decisionTypes(tmp);
     assert.ok(!types.includes('repeat'), 'framework must never replay completed actions');
     assert.strictEqual(types.filter((t) => t === 'decision').length, 5);
+    // Curriculum authority must be gone: no curriculum goal bootstrap, no
+    // tactic preemption events in default autonomous mode.
+    assert.ok(!types.includes('curriculum_tactic'));
+    assert.ok(!types.includes('milestone_selected'));
+    assert.ok(!types.includes('milestone_skipped_already_satisfied'));
+    assert.ok(!types.includes('curriculum_missed_ready_action'));
   } finally {
     clearEnv();
   }
@@ -152,12 +159,118 @@ test('goalChange replaces the goal exactly once', async () => {
     };
     stubBehavior.executeNextStep = async () => ({ ok: true });
     await runAgentLoop(mockBot(), { mode: 'autonomous', maxSteps: 3, decisionDelayMs: 1, directive: 'test' });
-    // One curriculum bootstrap change + one genuine model goalChange.
-    const changes = readDecisions(tmp).filter((d) => d.type === 'goal_changed');
-    assert.strictEqual(changes.length, 2);
-    assert.match(changes[0].reason || '', /^curriculum:/);
-    assert.ok(!(changes[1].reason || '').startsWith('curriculum:'));
+    // Only one change: the genuine model goalChange (from null). No
+    // curriculum bootstrap exists anymore.
+    const raw = readDecisions(tmp);
+    const changes = raw.filter((d) => d.type === 'goal_changed');
+    assert.strictEqual(changes.length, 1);
+    assert.ok(!(changes[0].reason || '').startsWith('curriculum:'));
+    assert.strictEqual(changes[0].to, 'Find wood elsewhere');
+    // The first self-chosen goal is recorded as a selection, not a revision.
+    const selected = raw.filter((d) => d.type === 'self_goal_selected');
+    assert.strictEqual(selected.length, 1);
+    assert.strictEqual(selected[0].goal, 'Find wood elsewhere');
+    assert.strictEqual(raw.filter((d) => d.type === 'self_goal_changed').length, 0);
     const types = decisionTypes(tmp);
+  } finally {
+    clearEnv();
+  }
+});
+
+test('model goal revision is recorded as self_goal_changed', async () => {
+  const tmp = freshEnv();
+  try {
+    const stepA = { type: 'primitive', name: 'wait', args: { seconds: 1 } };
+    let plannerCalls = 0;
+    stubBehavior.planAutonomous = async () => {
+      plannerCalls += 1;
+      if (plannerCalls === 1) {
+        return { decision: { assessment: 'first', goalChange: { description: 'Get food', priority: 60, reason: 'hungry' }, nextStep: stepA } };
+      }
+      if (plannerCalls === 2) {
+        return { decision: { assessment: 'second', goalChange: { description: 'Build shelter', priority: 50, reason: 'night coming' }, nextStep: stepA } };
+      }
+      return { decision: { assessment: 'steady', goalChange: null, nextStep: stepA } };
+    };
+    stubBehavior.executeNextStep = async () => ({ ok: true });
+    await runAgentLoop(mockBot(), { mode: 'autonomous', maxSteps: 3, decisionDelayMs: 1, directive: 'test' });
+    const raw = readDecisions(tmp);
+    assert.strictEqual(raw.filter((d) => d.type === 'self_goal_selected').length, 1);
+    const changed = raw.filter((d) => d.type === 'self_goal_changed');
+    assert.strictEqual(changed.length, 1);
+    assert.strictEqual(changed[0].goal, 'Build shelter');
+    assert.strictEqual(changed[0].reason, 'night coming');
+  } finally {
+    clearEnv();
+  }
+});
+
+test('planner owns every decision even when a deterministic tactic would fire', async () => {
+  const tmp = freshEnv();
+  try {
+    // 4 logs: obtain_logs is complete and make_planks is active with
+    // materials ready — the retired deterministic tactic layer would have
+    // preempted cognition with craft_item(oak_planks) here. The planner must
+    // instead own every decision.
+    const bot = mockBot();
+    bot.inventory = { items: () => [{ name: 'oak_log', count: 4, type: 36 }] };
+    const chosen = { type: 'primitive', name: 'explore', args: { distance: 16, direction: 'east' } };
+    let plannerCalls = 0;
+    stubBehavior.planAutonomous = async () => {
+      plannerCalls += 1;
+      return { decision: { assessment: 'my own strategic choice', goalChange: null, nextStep: chosen } };
+    };
+    const executed = [];
+    stubBehavior.executeNextStep = async (b, nextStep) => {
+      executed.push(JSON.parse(JSON.stringify(nextStep)));
+      return { ok: true };
+    };
+    await runAgentLoop(bot, { mode: 'autonomous', maxSteps: 3, decisionDelayMs: 1, directive: 'test' });
+    assert.strictEqual(plannerCalls, 3, 'cognition consulted every tick');
+    assert.deepStrictEqual(executed, [chosen, chosen, chosen], 'executed steps come from the planner only');
+    const types = decisionTypes(tmp);
+    assert.strictEqual(types.filter((t) => t === 'curriculum_tactic').length, 0, 'no deterministic tactic events');
+    assert.ok(types.includes('progression_observer_started'), 'observer still running silently');
+  } finally {
+    clearEnv();
+  }
+});
+
+test('silent progression observer records achievements without goal authority', async () => {
+  const tmp = freshEnv();
+  try {
+    // Mutable inventory: empty at spawn, logs appear after the first action.
+    // The observer must record the in-run achievement (progress_achievement)
+    // on the step-2 tick while still creating no goals.
+    const bot = mockBot();
+    bot.inventory = { items: () => [] };
+    const stepA = { type: 'primitive', name: 'wait', args: { seconds: 1 } };
+    stubBehavior.planAutonomous = async () => ({ decision: { assessment: 'test', goalChange: null, nextStep: stepA } });
+    let executedSteps = 0;
+    stubBehavior.executeNextStep = async () => {
+      executedSteps += 1;
+      if (executedSteps === 1) {
+        bot.inventory = { items: () => [{ name: 'oak_log', count: 5, type: 36 }] };
+      }
+      return { ok: true };
+    };
+    await runAgentLoop(bot, { mode: 'autonomous', maxSteps: 3, decisionDelayMs: 1, directive: 'test' });
+    const raw = readDecisions(tmp);
+    const types = decisionTypes(tmp);
+    // Observer started exactly once and recorded the achievement.
+    assert.strictEqual(types.filter((t) => t === 'progression_observer_started').length, 1);
+    const achievements = raw.filter((d) => d.type === 'progress_achievement');
+    assert.ok(achievements.some((a) => a.id === 'obtain_logs'), 'log achievement observed silently');
+    const logs = achievements.find((a) => a.id === 'obtain_logs');
+    assert.ok(logs.step >= 2, 'achievement recorded on a later tick, not pre-existing');
+    assert.ok(Number.isFinite(logs.elapsedMs), 'achievement carries elapsedMs');
+    for (const a of achievements) {
+      assert.ok(!a.milestone && !a.nextMilestone, 'no instruction payload in observer events');
+    }
+    // The observer must NOT create goals or steer.
+    assert.strictEqual(raw.filter((d) => d.type === 'goal_changed').length, 0);
+    assert.strictEqual(raw.filter((d) => d.type === 'self_goal_selected').length, 0);
+    assert.ok(!types.includes('milestone_selected'), 'observer does not select/steer');
   } finally {
     clearEnv();
   }

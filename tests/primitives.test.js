@@ -7,7 +7,7 @@ const { executePrimitive, listPrimitives } = require('../src/primitives');
 
 test('primitive registry lists the trusted set', () => {
   const names = listPrimitives().map((p) => p.name);
-  for (const expected of ['move_near', 'move_near_entity', 'move_away_from_entity', 'stop_movement', 'jump_forward', 'explore', 'find_block', 'find_entity', 'equip_best_melee_weapon', 'attack_entity', 'stop_attacking', 'equip_item', 'inspect_inventory', 'eat_best_food', 'sleep', 'wait', 'mine_block', 'mine_block_type', 'craft_item', 'place_block', 'use_item', 'chat']) {
+  for (const expected of ['move_near', 'move_near_entity', 'move_away_from_entity', 'stop_movement', 'jump_forward', 'explore', 'find_block', 'find_entity', 'equip_best_melee_weapon', 'attack_entity', 'stop_attacking', 'equip_item', 'inspect_inventory', 'eat_best_food', 'sleep', 'wait', 'mine_block', 'mine_block_type', 'craft_item', 'place_block', 'use_item', 'chat', 'lookup_recipe', 'lookup_uses', 'search_game_data', 'lookup_item', 'lookup_block', 'lookup_minecraft_reference']) {
     assert.ok(names.includes(expected), `missing primitive ${expected}`);
   }
   assert.ok(PRIMITIVE_NAMES.length >= 20);

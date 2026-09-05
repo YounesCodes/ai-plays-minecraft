@@ -133,6 +133,27 @@ const PRIMITIVE_SCHEMAS = {
   chat: {
     message: { type: 'string', required: true, minLength: 1, maxLength: 140 },
   },
+  // Informational knowledge primitives: read-only lookups whose results
+  // become lastResult. No URL/path/code fields — queries are plain text and
+  // item/block names follow the canonical name pattern.
+  lookup_recipe: {
+    item: ITEM_NAME,
+  },
+  lookup_uses: {
+    item: ITEM_NAME,
+  },
+  search_game_data: {
+    query: { type: 'string', required: true, minLength: 1, maxLength: 64 },
+  },
+  lookup_item: {
+    item: ITEM_NAME,
+  },
+  lookup_block: {
+    block: ITEM_NAME,
+  },
+  lookup_minecraft_reference: {
+    query: { type: 'string', required: true, minLength: 1, maxLength: 200 },
+  },
 };
 
 const PRIMITIVE_NAMES = Object.keys(PRIMITIVE_SCHEMAS);
