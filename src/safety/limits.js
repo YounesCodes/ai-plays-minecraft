@@ -102,4 +102,13 @@ function reflectionMaxTokens() {
   return intEnv('REFLECTION_MAX_TOKENS', 1024, 128, 8192);
 }
 
-module.exports = { getLimits, countLogsInInventory, isGoalComplete, autonomousMaxTokens, reflectionMaxTokens, intEnv, boolEnv, strEnv };
+// Provider-enforced structured output for the autonomous-v2 shell. A/B
+// evidence (sequential, 48 calls/mode, DeepSeek V4 Flash): parse failures
+// 3 -> 0, valid 83.3% -> 89.6%, latency p50 10.1s -> 4.1s under a degraded
+// provider window; no quality loss; local validation stays authoritative.
+// Env kill-switch: STRUCTURED_OUTPUT=0 reverts to plain JSON.
+function structuredOutputEnabled() {
+  return boolEnv('STRUCTURED_OUTPUT', true);
+}
+
+module.exports = { getLimits, countLogsInInventory, isGoalComplete, autonomousMaxTokens, reflectionMaxTokens, structuredOutputEnabled, intEnv, boolEnv, strEnv };

@@ -261,3 +261,26 @@ test('reflection memory writes are traceable by the actual store ID', async () =
     delete process.env.LOG_DIR;
   }
 });
+
+test('loop honors the STRUCTURED_OUTPUT kill-switch toward the planner', async () => {
+  const tmp = freshEnv();
+  semanticStore.length = 0;
+  episodicStore.length = 0;
+  try {
+    const wait = { type: 'primitive', name: 'wait', args: { seconds: 1 } };
+    const seen = [];
+    stubBehavior.planAutonomous = async (args) => {
+      seen.push(args.structuredOutput);
+      return { decision: { assessment: 'a', goalChange: null, nextStep: wait } };
+    };
+    process.env.STRUCTURED_OUTPUT = '0';
+    await runAgentLoop(mockBot(), { mode: 'autonomous', maxSteps: 1, decisionDelayMs: 1, directive: 'test' });
+    process.env.STRUCTURED_OUTPUT = '1';
+    await runAgentLoop(mockBot(), { mode: 'autonomous', maxSteps: 1, decisionDelayMs: 1, directive: 'test' });
+    assert.deepStrictEqual(seen, [false, true]);
+  } finally {
+    delete process.env.STRUCTURED_OUTPUT;
+    delete process.env.MEMORY_DIR;
+    delete process.env.LOG_DIR;
+  }
+});

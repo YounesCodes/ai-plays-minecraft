@@ -531,7 +531,8 @@ async function runAutonomousLoop(bot, options = {}) {
       });
       let decision = null;
       try {
-        const { decision: validated } = await planAutonomous({ context, knownSkillNames });
+        const { structuredOutputEnabled } = require('../safety/limits');
+        const { decision: validated } = await planAutonomous({ context, knownSkillNames, structuredOutput: structuredOutputEnabled() });
         decision = validated;
         consecutivePlannerFailures = 0;
         applyGoalChange({ validated, goalManager, step });
