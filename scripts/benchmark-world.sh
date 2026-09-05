@@ -166,8 +166,13 @@ case "$CMD" in
       fi
       log "activating snapshot $NAME -> world/"
       cp -r "$SNAP_DIR/$NAME" "$SERVER_DIR/world"
-      RESTORED_ID="$(ensure_world_id "$SERVER_DIR/world" "")"
-      log "world-instance id=$RESTORED_ID (travels with the snapshot)"
+      if [ -n "$(read_world_id "$SERVER_DIR/world")" ]; then
+        RESTORED_ID="$(read_world_id "$SERVER_DIR/world")"
+        log "world-instance id=$RESTORED_ID (traveled with the snapshot)"
+      else
+        RESTORED_ID="$(write_world_id "$SERVER_DIR/world" "")"
+        log "snapshot predates identities; minted world-instance id=$RESTORED_ID (kept with this world from now on)"
+      fi
       log "done. Start Paper."
     fi
     ;;
