@@ -117,6 +117,13 @@ test('recipe hints come from minecraft-data, not hard-coded chains', () => {
   assert.strictEqual(recipeHint('not_a_real_item_xyz', {}, '1.21.11'), null);
 });
 
+test('status exposes exact craftAs name (no family guessing)', () => {
+  const { recipeStatus } = require('../src/curriculum/manager');
+  const s = recipeStatus('make_planks', { inventory: { oak_log: 6 }, nearbyBlocks: [], session: {}, mcVersion: '1.21.11', worldLocations: [], botPosition: null });
+  assert.strictEqual(s.craftAs, 'oak_planks');
+  assert.strictEqual(s.materialsReady, true);
+});
+
 test('active craft milestone carries its recipe', () => {
   const { createCurriculumManager } = require('../src/curriculum/manager');
   const c = createCurriculumManager();

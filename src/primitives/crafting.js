@@ -63,7 +63,22 @@ async function craftItem(bot, args) {
   }
   try {
     await bot.craft(recipes[0], n, table || null);
-    return { ok: true, primitive: 'craft_item', item: itemName, crafted: n };
+    const out = { ok: true, primitive: 'craft_item', item: itemName, crafted: n };
+    // Trusted workstation fact: when a real table was used, report WHERE
+    // it was so the loop can anchor/refresh station memory. Only present
+    // when a table actually participated — never guessed.
+    try {
+      if (table && table.position && Number.isFinite(table.position.x)) {
+        out.craftingTablePosition = {
+          x: Math.round(table.position.x),
+          y: Math.round(table.position.y),
+          z: Math.round(table.position.z),
+        };
+      }
+    } catch {
+      // ignore
+    }
+    return out;
   } catch (err) {
     return { ok: false, primitive: 'craft_item', item: itemName, error: err?.message || 'Crafting failed' };
   }

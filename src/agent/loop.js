@@ -225,6 +225,10 @@ async function runAutonomousLoop(bot, options = {}) {
     const curriculum = createCurriculumManager();
     const curriculumSession = {};
     let curriculumStarted = false;
+    // Readiness-drift tracking (§11): craft milestone with materials ready
+    // but repeatedly deferred. Observation only — never auto-executes.
+    let readinessDrift = { milestoneId: null, count: 0 };
+    let lastTickStatus = null;
     // Description last written BY curriculum sync. A model goalChange to
     // something else is a genuine strategic override and sticks: sync only
     // creates the initial goal or advances its own previous goal, never
@@ -398,7 +402,7 @@ async function runAutonomousLoop(bot, options = {}) {
       // 2b. Curriculum tick (deterministic progression). Skipped while an
       // emergency goal is active — suspension/resume keep working, and the
       // next calm tick re-syncs any stale resumed description.
-      let curriculumView = { activeMilestone: null, completedMilestones: [] };
+      let curriculumView = { activeMilestone: null, completedMilestones: [], drift: { detected: false } };
       try {
         const gsNow = goalManager.getState();
         if (!gsNow.currentGoal?.emergency) {
@@ -413,8 +417,17 @@ async function runAutonomousLoop(bot, options = {}) {
             nearbyBlocks: (perception && perception.interestingBlocks) || [],
             session: curriculumSession,
             mcVersion: (bot && bot.version) || process.env.MC_VERSION || '1.21.11',
+            worldLocations: listWorldLocations(worldMemory),
+            botPosition: posOf(perception),
           });
-          curriculumView = { activeMilestone: tickState.activeMilestone, completedMilestones: tickState.completedMilestones };
+          try {
+            lastTickStatus = tickState.activeMilestone && tickState.activeMilestone.status
+              ? { id: tickState.activeMilestone.id, status: tickState.activeMilestone.status }
+              : null;
+          } catch {
+            lastTickStatus = null;
+          }
+          curriculumView = { activeMilestone: tickState.activeMilestone, completedMilestones: tickState.completedMilestones, drift: driftForContext(readinessDrift) };
           if (!curriculumStarted) {
             curriculumStarted = true;
             decisions.record('curriculum_started', { step, active: tickState.activeMilestone ? tickState.activeMilestone.id : null, completed: tickState.completedMilestones });
@@ -521,6 +534,30 @@ async function runAutonomousLoop(bot, options = {}) {
             goalChange: validated.goalChange?.description || null,
             nextStep: validated.nextStep,
           });
+          // Readiness-drift observation (§10/§11): craft milestone ready
+          // but the fresh decision goes elsewhere. Counted, never overridden.
+          try {
+            readinessDrift = updateReadinessDrift({
+              drift: readinessDrift,
+              status: lastTickStatus,
+              nextStep: validated.nextStep,
+              emergency: !!(topInterrupt && isUrgent(topInterrupt)),
+            });
+            if (readinessDrift.deferred) {
+              const st = readinessDrift.status;
+              decisions.record('curriculum_missed_ready_action', {
+                step,
+                milestone: readinessDrift.milestoneId,
+                selectedAction: stepName(validated.nextStep),
+                materialsReady: !!(st && st.materialsReady),
+                requiresTable: !!(st && st.requiresTable),
+                tableNearby: st ? st.tableNearby : null,
+                knownStationDistance: st && st.knownStation ? st.knownStation.distance : null,
+              });
+            }
+          } catch {
+            // telemetry must never break cognition
+          }
         } catch (err) {
           consecutivePlannerFailures += 1;
           metrics.inc('llmErrors');
@@ -619,6 +656,12 @@ async function runAutonomousLoop(bot, options = {}) {
         else resourceFailStreak += 1;
       }
       lastResult = result;
+      // Anchor trusted workstation facts from verified body outcomes.
+      try {
+        anchorWorkstationFromResult({ result, bot, step });
+      } catch {
+        // ignore
+      }
 
       // 8. Post-step perception + reflection.
       let perceptionAfter = null;
@@ -713,6 +756,123 @@ function shouldCurriculumSync(currentGoal, wantMilestone, lastCurriculumGoal) {
   if (!wantMilestone) return false;
   if (!currentGoal) return true;
   return currentGoal.description === lastCurriculumGoal && currentGoal.description !== wantMilestone.description;
+}
+
+// Actions that move TOWARD a ready craft milestone (craft it, place the
+// needed table, or travel to the known station). Anything else while ready
+// is an observed deferral — counted for cognition, never overridden.
+const READY_PROGRESS_ACTIONS = new Set(['craft_item', 'place_block_nearby', 'move_to_known_location']);
+
+function stepName(nextStep) {
+  try {
+    if (!nextStep || typeof nextStep !== 'object') return '?';
+    return `${nextStep.type === 'skill' ? 'skill' : 'primitive'}:${nextStep.name || '?'}`;
+  } catch {
+    return '?';
+  }
+}
+
+function updateReadinessDrift({ drift, status, nextStep, emergency }) {
+  const base = drift && typeof drift === 'object' ? { ...drift } : { milestoneId: null, count: 0 };
+  delete base.deferred;
+  delete base.status;
+  const id = status && status.id ? status.id : null;
+  const ready = !!(status && status.status && status.status.materialsReady === true);
+  // Reset on milestone change, emergency, non-craft milestones, or progress.
+  if (emergency || !id || !ready || (base.milestoneId && base.milestoneId !== id)) {
+    return { milestoneId: ready && !emergency ? id : base.milestoneId, count: 0 };
+  }
+  const name = nextStep && typeof nextStep.name === 'string' ? nextStep.name : '';
+  if (READY_PROGRESS_ACTIONS.has(name)) {
+    return { milestoneId: id, count: 0 };
+  }
+  const count = (base.milestoneId === id ? base.count : 0) + 1;
+  const out = { milestoneId: id, count };
+  if (count >= 1) {
+    out.deferred = true;
+    out.status = status.status;
+  }
+  return out;
+}
+
+function driftForContext(drift) {
+  try {
+    if (drift && drift.milestoneId && drift.count >= 2) {
+      return {
+        detected: true,
+        milestone: drift.milestoneId,
+        reason: 'materials are ready but crafting has been deferred repeatedly',
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return { detected: false };
+}
+
+function listWorldLocations(worldMemory) {
+  const out = [];
+  try {
+    if (!worldMemory || typeof worldMemory.list !== 'function') return out;
+    for (const e of worldMemory.list() || []) {
+      if (!e || typeof e.name !== 'string' || !e.position) continue;
+      out.push({ name: e.name, position: e.position, metadata: e.metadata || {} });
+      if (out.length >= 20) break;
+    }
+  } catch {
+    // ignore
+  }
+  return out;
+}
+
+// Trusted workstation anchoring (§1/§2): coordinates ONLY from verified
+// body outcomes — placed positions or tables actually used in a craft.
+// Never from LLM text. Memory writes stay in this agent layer.
+function anchorWorkstationFromResult({ result, bot, step }) {
+  try {
+    if (!result || result.ok !== true) return null;
+    if (typeof memoryEnabled !== 'function' || !memoryEnabled()) return null;
+    const dim = (() => {
+      try {
+        const d = bot && bot.game && bot.game.dimension;
+        if (typeof d === 'string' && d) return d;
+      } catch {
+        // ignore
+      }
+      return 'overworld';
+    })();
+    const numPos = (p) => {
+      if (!p || !Number.isFinite(Number(p.x)) || !Number.isFinite(Number(p.y)) || !Number.isFinite(Number(p.z))) return null;
+      return { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
+    };
+    const placedItem = result.item || result.block;
+    if ((result.primitive === 'place_block_nearby' || result.primitive === 'place_block') && placedItem === 'crafting_table') {
+      const pos = numPos(result.position);
+      if (!pos) return null;
+      const world = require('../memory/world');
+      const res = world.remember('crafting_station', pos, { kind: 'workstation', block: 'crafting_table', source: 'trusted_placement' }, dim);
+      if (res?.ok) {
+        try { metrics.inc('memoriesWritten'); } catch { /* ignore */ }
+        decisions.record('station_anchored', { step, source: 'trusted_placement', position: pos });
+        return pos;
+      }
+      return null;
+    }
+    if (result.primitive === 'craft_item' && result.craftingTablePosition) {
+      const pos = numPos(result.craftingTablePosition);
+      if (!pos) return null;
+      const world = require('../memory/world');
+      const res = world.remember('crafting_station', pos, { kind: 'workstation', block: 'crafting_table', source: 'trusted_use' }, dim);
+      if (res?.ok) {
+        try { metrics.inc('memoriesWritten'); } catch { /* ignore */ }
+        decisions.record('station_anchored', { step, source: 'trusted_use', position: pos });
+        return pos;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return null;
 }
 
 // Compact inventory counts for milestone telemetry (top items only).
@@ -991,4 +1151,4 @@ async function tryReflect({ event, goal, stateBefore, attempted, result, stateAf
   }
 }
 
-module.exports = { runAgentLoop, runBenchmarkLoop, runAutonomousLoop, safeFallback, shouldCurriculumSync };
+module.exports = { runAgentLoop, runBenchmarkLoop, runAutonomousLoop, safeFallback, shouldCurriculumSync, anchorWorkstationFromResult, updateReadinessDrift, driftForContext };

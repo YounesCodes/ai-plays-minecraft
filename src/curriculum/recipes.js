@@ -113,16 +113,19 @@ function recipeHint(target, inventory, version) {
     if (parsed.length === 0) return null;
     // Prefer a recipe whose materials are already held (adapts across
     // stone/cobblestone/deepslate variants); else the first known recipe.
+    // The resolved concrete item name travels with the hint so callers
+    // never have to guess family names ("planks" vs "oak_planks").
+    const withName = (p) => ({ name, needs: p.needs, requiresTable: p.requiresTable });
     try {
       const inv = inventory || {};
       const covered = parsed.find((p) =>
         Object.entries(p.needs).every(([n, c]) => Number(inv[n] || 0) >= c)
       );
-      if (covered) return covered;
+      if (covered) return withName(covered);
     } catch {
       // ignore
     }
-    return parsed[0];
+    return withName(parsed[0]);
   } catch {
     return null;
   }

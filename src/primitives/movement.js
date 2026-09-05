@@ -3,7 +3,9 @@
 // Movement primitives. All bounded, all return structured results, never throw
 // for ordinary Minecraft failures (no path, no target).
 
-const { blockAtPos } = require('../blocks');
+const { blockAtPos, matchBlockName } = require('../blocks');
+const worldMemory = require('../memory/world');
+const targetFailures = require('../navigation/targetFailures');
 
 function stopBotMotion(bot) {
   try {
@@ -423,4 +425,88 @@ async function stopMovement(bot) {
   return { ok: true, primitive: 'stop_movement' };
 }
 
-module.exports = { moveNear, moveNearEntity, moveAwayFromEntity, stopMovement, findEntityById, stopBotMotion, raceWithAbort, jumpForward, gotoWithStallWatch: attemptGoto, goalNear };
+// Generic movement to a TRUSTED remembered location. The LLM names a
+// memory entry — never coordinates. Resolves via world memory, checks
+// dimension, travels with the hardened machinery. Workstation entries are
+// verified on arrival: a remembered crafting station with no actual table
+// nearby is forgotten (stale) rather than kept as a known-false fact.
+// Later the same mechanism can serve home/furnace/storage/portal entries.
+async function moveToKnownLocation(bot, args, ctx = {}) {
+  const timeoutMs = ctx.timeoutMs || 45000;
+  const range = Math.max(1, Math.min(8, parseInt(args.range ?? 4, 10) || 4));
+  const run = (async () => {
+    try {
+      const name = typeof args.name === 'string' ? args.name.trim() : '';
+      if (!name || name.length > 80 || !/^[A-Za-z0-9_-]+$/.test(name)) {
+        return { ok: false, primitive: 'move_to_known_location', error: 'Unknown location (invalid name)' };
+      }
+      let entry = null;
+      try {
+        entry = worldMemory.get(name);
+      } catch {
+        entry = null;
+      }
+      if (!entry || !entry.position) {
+        return { ok: false, primitive: 'move_to_known_location', name, error: `Unknown location: ${name}` };
+      }
+      const dimension = targetFailures.botDimension(bot);
+      if (entry.dimension && entry.dimension !== dimension) {
+        return { ok: false, primitive: 'move_to_known_location', name, error: `Location ${name} is in another dimension` };
+      }
+      const px = Number(entry.position.x);
+      const py = Number(entry.position.y);
+      const pz = Number(entry.position.z);
+      if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(pz)) {
+        return { ok: false, primitive: 'move_to_known_location', name, error: `Location ${name} has no usable coordinates` };
+      }
+      if (!bot.pathfinder || typeof bot.pathfinder.goto !== 'function') {
+        return { ok: false, primitive: 'move_to_known_location', name, error: 'Pathfinder unavailable' };
+      }
+      const goals = getGoals();
+      if (!goals) return { ok: false, primitive: 'move_to_known_location', name, error: 'Pathfinder goals unavailable' };
+      const me = bot.entity?.position;
+      const startDist = me
+        ? Math.sqrt((me.x - px) * (me.x - px) + (me.y - py) * (me.y - py) + (me.z - pz) * (me.z - pz))
+        : null;
+      const goal = new goals.GoalNear(Math.floor(px), Math.floor(py), Math.floor(pz), range);
+      const first = await attemptGoto(bot, goal, { timeoutMs, primitive: 'move_to_known_location', ctx });
+      const settled = await settleMove(bot, first, goal, {
+        timeoutMs, primitive: 'move_to_known_location', ctx, extra: { name },
+      });
+      if (!settled.ok) return settled;
+      const end = bot.entity?.position;
+      const finalDistance = end
+        ? Math.round(Math.sqrt((end.x - px) * (end.x - px) + (end.y - py) * (end.y - py) + (end.z - pz) * (end.z - pz)) * 10) / 10
+        : null;
+      const out = {
+        ...settled,
+        name,
+        distanceMoved: startDist !== null && finalDistance !== null ? Math.round(Math.abs(startDist - finalDistance) * 10) / 10 : null,
+        finalDistance,
+      };
+      // Stale healing for remembered workstations: arrived but no table
+      // observable nearby -> forget the entry, say so honestly. Movement
+      // itself succeeded; cognition decides whether to place a new table.
+      try {
+        const meta = entry.metadata && typeof entry.metadata === 'object' ? entry.metadata : {};
+        const isStation = meta.kind === 'workstation' && typeof meta.block === 'string';
+        if (isStation && typeof bot.findBlock === 'function') {
+          const table = bot.findBlock({ matching: matchBlockName(meta.block), maxDistance: 10 });
+          if (!table) {
+            try { worldMemory.forget(name); } catch { /* ignore */ }
+            out.stationStale = true;
+            out.warning = `Remembered ${name} reached but no ${meta.block} observed nearby; memory invalidated`;
+          }
+        }
+      } catch {
+        // verification must never fail the movement
+      }
+      return out;
+    } catch (err) {
+      return { ok: false, primitive: 'move_to_known_location', error: err?.message || 'No path found' };
+    }
+  })();
+  return raceWithAbort(bot, run, { timeoutMs, primitive: 'move_to_known_location', ctx });
+}
+
+module.exports = { moveNear, moveNearEntity, moveAwayFromEntity, moveToKnownLocation, stopMovement, findEntityById, stopBotMotion, raceWithAbort, jumpForward, gotoWithStallWatch: attemptGoto, goalNear };

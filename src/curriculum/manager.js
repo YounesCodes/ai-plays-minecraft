@@ -14,6 +14,100 @@ const { MILESTONES } = require('./milestones');
 const { isComplete } = require('./evaluator');
 const { recipeHint, craftTargetFor } = require('./recipes');
 
+const TABLE_NEARBY_RADIUS = 6; // matches crafting.js table search radius
+
+function hasCount(inventory, name, n) {
+  try {
+    return Number((inventory || {})[name] || 0) >= n;
+  } catch {
+    return false;
+  }
+}
+
+function nearestWorkstation(worldLocations, me) {
+  try {
+    let best = null;
+    for (const loc of worldLocations || []) {
+      if (!loc || typeof loc.name !== 'string') continue;
+      const lp = loc.position || loc;
+      const info = loc.metadata && typeof loc.metadata === 'object' ? loc.metadata : {};
+      if (info.kind !== 'workstation') continue;
+      if (!lp || !Number.isFinite(lp.x)) continue;
+      let d = null;
+      if (me && Number.isFinite(me.x) && Number.isFinite(me.z)) {
+        const dx = lp.x - me.x;
+        const dy = (Number.isFinite(lp.y) ? lp.y : me.y) - (Number.isFinite(me.y) ? me.y : 0);
+        const dz = lp.z - me.z;
+        d = Math.round(Math.sqrt(dx * dx + dy * dy + dz * dz) * 10) / 10;
+      }
+      if (!best || (d !== null && (best.distance === null || d < best.distance))) {
+        best = { name: loc.name, distance: d };
+      }
+    }
+    return best;
+  } catch {
+    return null;
+  }
+}
+
+// Deterministic readiness: WHAT the state is (missing counts, table
+// proximity, station memory), never HOW to act. One-level craftable
+// hints use installed recipe data, never hard-coded chains.
+function recipeStatus(milestoneId, state) {
+  const target = craftTargetFor(milestoneId);
+  if (!target) return null;
+  const inventory = (state && state.inventory) || {};
+  let hint = null;
+  try {
+    hint = recipeHint(target, inventory, state.mcVersion);
+  } catch {
+    hint = null;
+  }
+  if (!hint) {
+    return { target, needs: null, missing: null, materialsReady: false, requiresTable: null, tableNearby: null, knownStation: null, craftableMissing: [] };
+  }
+  const missing = {};
+  for (const [name, count] of Object.entries(hint.needs)) {
+    if (!hasCount(inventory, name, count)) missing[name] = count;
+  }
+  const materialsReady = Object.keys(missing).length === 0;
+  let tableNearby = null;
+  try {
+    const blocks = (state && state.nearbyBlocks) || [];
+    tableNearby = blocks.some((b) => b && b.type === 'crafting_table' && typeof b.distance === 'number' && b.distance <= TABLE_NEARBY_RADIUS);
+  } catch {
+    tableNearby = null;
+  }
+  const craftableMissing = [];
+  if (!materialsReady) {
+    for (const name of Object.keys(missing)) {
+      try {
+        const sub = recipeHint(name, inventory, state.mcVersion);
+        if (sub && Object.keys(sub.needs).length > 0) {
+          const canNow = Object.entries(sub.needs).every(([n, c]) => hasCount(inventory, n, c));
+          if (canNow) craftableMissing.push({ item: name, canCraftNow: true });
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+  // Concrete item name to craft (family-resolved): the model must use
+  // EXACTLY this name in craft_item — guessing "planks" fails validation
+  // while "oak_planks" succeeds (observed live).
+  return {
+    target,
+    craftAs: hint.name || target,
+    needs: hint.needs,
+    missing,
+    materialsReady,
+    requiresTable: hint.requiresTable === true,
+    tableNearby,
+    knownStation: nearestWorkstation(state.worldLocations, state.botPosition),
+    craftableMissing,
+  };
+}
+
 function hasItem(inventory, name, n = 1) {
   try {
     return Number((inventory || {})[name]) >= n;
@@ -106,6 +200,8 @@ function createCurriculumManager({ milestones = MILESTONES } = {}) {
           const hint = recipeHint(target, state.inventory, state.mcVersion);
           if (hint) active.recipe = hint;
         }
+        const status = recipeStatus(m.id, state);
+        if (status) active.status = status;
       } catch {
         // recipe hints are advisory; milestones work without them
       }
@@ -163,4 +259,4 @@ function createCurriculumManager({ milestones = MILESTONES } = {}) {
   return { tick, noteOutcome, reset, milestones };
 }
 
-module.exports = { createCurriculumManager };
+module.exports = { createCurriculumManager, recipeStatus, nearestWorkstation };

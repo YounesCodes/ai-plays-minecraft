@@ -68,6 +68,10 @@ const PRIMITIVE_SCHEMAS = {
     entityId: { type: 'integer', required: true, min: 0, max: 100000000 },
     distance: { type: 'number', required: false, min: 2, max: 32 },
   },
+  move_to_known_location: {
+    name: { type: 'string', required: true, pattern: NAME_PATTERN, maxLength: 80 },
+    range: { type: 'integer', required: false, min: 1, max: 8 },
+  },
   jump_forward: {
     durationMs: { type: 'integer', required: false, min: 100, max: 2000 },
   },

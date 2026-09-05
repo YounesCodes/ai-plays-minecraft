@@ -292,7 +292,16 @@ function summarizeKnownLocations(pos, worldMemory, maxCount = 8) {
       if (!entry || typeof entry.name !== 'string') continue;
       const lp = entry.position || entry;
       if (!Number.isFinite(lp?.x)) continue;
-      out.push({ name: entry.name, distance: round1(dist3(lp, pos)) });
+      // Bounded safe metadata for cognition (kind/block help the planner
+      // recognize workstations). Never the full memory object.
+      const meta = entry.metadata && typeof entry.metadata === 'object' ? entry.metadata : {};
+      const safe = (v) => (typeof v === 'string' ? v.slice(0, 40) : null);
+      out.push({
+        name: entry.name,
+        kind: safe(meta.kind),
+        block: safe(meta.block),
+        distance: round1(dist3(lp, pos)),
+      });
     }
     out.sort((a, b) => a.distance - b.distance);
     return out.slice(0, maxCount);
